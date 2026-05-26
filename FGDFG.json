@@ -1,0 +1,140 @@
+{
+  "fileName": "FGDFG",
+  "description": "",
+  "botContact": null,
+  "phone": "",
+  "interval": {
+    "mins": 0,
+    "secs": 1
+  },
+  "estimatedTime": null,
+  "useAutoCalc": true,
+  "arrowData": {
+    "6": {
+      "type": "waitUntil",
+      "maxSkips": 2
+    },
+    "8": {
+      "type": "time",
+      "mins": 0,
+      "secs": 30
+    },
+    "11": {
+      "type": "stop"
+    }
+  },
+  "canvas": [
+    {
+      "id": "mjr562n",
+      "type": "input",
+      "value": "התחלה שלום",
+      "side": "send"
+    },
+    {
+      "id": "hemby5c",
+      "type": "text",
+      "value": " שלום",
+      "side": "expect",
+      "matchMode": "any"
+    },
+    {
+      "id": "dyugl8m",
+      "type": "menu",
+      "value": "בחר תפריט",
+      "items": [
+        {
+          "id": "wwzqqvd",
+          "name": "אשראי",
+          "description": "אשראי"
+        }
+      ],
+      "side": "expect",
+      "onFailure": {
+        "action": "retry",
+        "retryCount": 2
+      }
+    },
+    {
+      "id": "vndtsam",
+      "type": "button_select",
+      "buttonId": "אשראי",
+      "buttonText": "אשראי",
+      "side": "send"
+    },
+    {
+      "id": "xedsoux",
+      "type": "text",
+      "value": "מה תז שלך",
+      "side": "expect",
+      "matchMode": "contain",
+      "onFailure": {
+        "action": "stop",
+        "retryCount": 3
+      }
+    },
+    {
+      "id": "1i8dow7",
+      "type": "input",
+      "value": "2312ק/'ק'ק/'ק",
+      "side": "send"
+    },
+    {
+      "id": "b3r4p8x",
+      "type": "buttons",
+      "header": "OTP SENDER",
+      "buttons": [
+        {
+          "id": "andaade",
+          "name": "SMS",
+          "description": ""
+        }
+      ],
+      "side": "expect",
+      "onFailure": {
+        "action": "stop",
+        "retryCount": 3
+      }
+    },
+    {
+      "id": "yaaqbfg",
+      "type": "button_select",
+      "buttonId": "SMS",
+      "buttonText": "SMS",
+      "side": "send"
+    },
+    {
+      "id": "jjw4ufk",
+      "type": "text",
+      "value": "OTP",
+      "side": "expect",
+      "matchMode": "pattern",
+      "onFailure": {
+        "action": "stop",
+        "retryCount": 3
+      }
+    },
+    {
+      "id": "cxfs4xu",
+      "type": "input",
+      "value": "0000",
+      "side": "send"
+    },
+    {
+      "id": "24btcft",
+      "type": "text",
+      "value": "מעולה ",
+      "side": "expect",
+      "matchMode": "contain",
+      "onFailure": {
+        "action": "retry",
+        "retryCount": 5
+      }
+    },
+    {
+      "id": "m2xy1ga",
+      "type": "text",
+      "value": "",
+      "side": "expect"
+    }
+  ]
+}

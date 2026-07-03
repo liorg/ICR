@@ -1,229 +1,303 @@
-# Scenario Platform — Worker + Spine + Provisioner + Scheduler
+# Data Spine — Scenario Orchestrator
+
+## מבנה
+
+```
+spine/                              Spine service (Docker Swarm)
+├── Dockerfile
+├── main.py
+├── dependencies.py
+├── requirements.txt
+└── routers/
+    ├── calls.py                    יצירת call + scenario snapshot + runtime
+    ├── send.py                     POST /send/{phone_id} → Agent (Baileys)
+    ├── incoming.py                 POST /incoming/{phone_id} ← Agent
+    ├── worker_events.py            POST /events, /leaves, /heartbeat ← Worker
+    ├── webhooks.py                 רישום webhook לפי phone + סוג
+    ├── conversations.py            GET endpoints ל-React
+    └── notifications.py            התראות
+
+vid_michal_spine.py                 Proxy router ב-vid.michal-solutions.com
+ActiveChatsScreen.jsx               React קומפוננטה — 3 פאנלים
+migration.sql                       9 טבלאות Supabase
+docker-compose.yml                  Swarm stack
+```
 
 ## ארכיטקטורה
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Docker Swarm (overlay: scenario_spine-net)                     │
-│                                                                 │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐        │
-│  │ Provisioner   │   │ Worker       │   │ Worker       │        │
-│  │ (Go)          │   │ 972504476645 │   │ 972504477197 │  ...   │
-│  │ polls phones  │   │ :9000        │   │ :9000        │        │
-│  │ creates svcs  │   └──────┬───────┘   └──────┬───────┘        │
-│  └──────┬────────┘          │                   │               │
-│         │                   │ POST /api/spine/* │               │
-│         │ docker API        ▼                   ▼               │
-│  ┌──────┴────────────────────────────────────────┐              │
-│  │              Supabase                         │              │
-│  └───────────────────────────────────────────────┘              │
-│                                                                 │
-│  ┌──────────────┐                                               │
-│  │ Scheduler    │─── POST /api/spine/dispatch ──►               │
-│  │ (APScheduler)│                                               │
-│  └──────────────┘                                               │
-└─────────────────────────────────────────────────────────────────┘
-
-                    ▲ HTTPS
-                    │
-┌───────────────────┴──────────────────────┐
-│  vid.michal-solutions.com                │
-│  FastAPI (:8000)                         │
-│  ├── routers/contacts.py     (קיים)      │
-│  ├── routers/messages.py     (קיים)      │
-│  ├── routers/scenarios.py    (קיים)      │
-│  └── routers/spine.py        (חדש)       │
-└───────────────────┬──────────────────────┘
-                    │
-                    ▼
-            React (Vercel)
-            ActiveChatsScreen.jsx
+React (Vercel)
+  │ apiFetch("/spine/api/phones/{id}/active")
+  ▼
+vid.michal-solutions.com (FastAPI)
+  │ routers/spine.py (proxy)
+  │ proxy_pass → 127.0.0.1:8100
+  ▼
+┌─────────────────────────────────────────────────────────┐
+│ Docker Swarm (scenario_spine-net)                       │
+│                                                         │
+│  ┌────────────────┐    ┌────────────┐  ┌────────────┐  │
+│  │ data-spine     │    │ Worker 1   │  │ Worker 2   │  │
+│  │ :8000 (→8100)  │◄───│ :9000      │  │ :9000      │  │
+│  │                │───►│            │  │            │  │
+│  └───────┬────────┘    └─────┬──────┘  └─────┬──────┘  │
+│          │                   │               │         │
+│  ┌───────┴────────┐    ┌─────┴──────────────┴──────┐  │
+│  │ Provisioner    │    │ Baileys Agents (:3001)     │  │
+│  │ Go, כל 30s     │    │ host docker               │  │
+│  └────────────────┘    └───────────────────────────┘  │
+│                                                         │
+│  ┌────────────────┐                                    │
+│  │ Scheduler      │─── POST /calls → Spine             │
+│  │ APScheduler    │                                    │
+│  └────────────────┘                                    │
+└─────────────────────────────────────────────────────────┘
 ```
 
-## רכיבים
+## טבלאות
 
-### 1. Worker (.NET + Deno)
+### phone_workers
+Worker לכל טלפון. Go Provisioner יוצר שורה כשמקים service.
 
-מריץ סצנריות WhatsApp. כל Worker מנהל טלפון אחד.
+| עמודה | תיאור |
+|---|---|
+| phone_id | PK, מזהה טלפון |
+| service_name | worker-{phone_id} |
+| replicas | מספר replicas |
+| status | pending / running / stopped / error |
 
-- **Image:** `liorgr/worker-scenario-runtime:latest` (Docker Hub, ציבורי)
-- **Port:** 9000
-- **ENV:** `PHONE_ID`, `SERVICE_NAME`, `SPINE_URL`, `DENO_BIN`, `DENO_TMPDIR`
-- **Input:** מקבל `init` event מ-Spine עם scenario JSON
-- **Output:** שולח events, leaves, summary ל-Spine
+### spine_calls
+כל הרצה של סצנריו. כולל **snapshot** של ה-scenario JSON ברגע ההרצה.
 
-### 2. Spine (FastAPI router)
+| עמודה | תיאור |
+|---|---|
+| call_id | PK |
+| scenario_id | מזהה סצנריו |
+| scenario_snapshot | JSONB — עותק של הסצנריו |
+| phone_id | מאיזה טלפון |
+| contact_id | לאיזה איש קשר |
+| status | running / completed / failed / expired |
+| sender_count | כמה הודעות הבוט שלח |
+| expected_count | כמה תשובות התקבלו |
+| mismatch_count | כמה לא תאמו |
 
-**לא service נפרד** — router חדש (`spine.py`) בתוך FastAPI הקיים ב-`vid.michal-solutions.com`.
+### spine_messages
+כל הודעת WhatsApp שעברה דרך Spine (שליחה וקבלה).
 
-Worker שולח לכאן:
-- `POST /api/spine/events` — לוג אירועים
-- `POST /api/spine/leaves` — כל הודעה בזמן אמת
-- `PATCH /api/spine/leaves/{id}/status` — עדכון סטטוס הודעה
-- `POST /api/spine/calls/{id}/summary` — סיכום בסוף הרצה
-- `POST /api/spine/heartbeat` — דופק
+| עמודה | תיאור |
+|---|---|
+| id | PK auto |
+| phone_id | טלפון |
+| contact_id | איש קשר |
+| direction | true=יוצא (בוט), false=נכנס |
+| content | תוכן |
+| message_type | text / image / audio / buttons / menu / button_reply |
+| wa_message_id | מזהה Baileys |
+| status | pending / sent / delivered / read / failed |
 
-React קורא מכאן:
-- `GET /api/spine/phones/{phone_id}/active` — אנשי קשר active + שיחה אחרונה
-- `GET /api/spine/phones/{phone_id}/contacts/{contact_id}/calls` — כל ההרצות
-- `GET /api/spine/calls/{call_id}/leaves` — הודעות (live poll)
-- `GET /api/spine/workers` — רשימת Workers
+### spine_leaves
+צעד בסצנריו — Worker שולח כל leaf בזמן אמת.
 
-### 3. Provisioner (Go)
+| עמודה | תיאור |
+|---|---|
+| leaf_id | PK |
+| call_id | FK → spine_calls |
+| type | Sender (בוט שלח) / Expected (ממתין לתשובה) |
+| content | תוכן ההודעה |
+| wa_type | text / buttons / list / button_reply |
+| status | Pending → Sent → Matched / Mismatched / Timeout |
 
-Job שרץ כל 30 שניות. בודק טבלת `phones` מול `phone_workers`.
+### spine_leaf_messages
+**רבים לרבים** — מקשר leaf ל-message. leaf_id + message_id.
 
-- טלפון `status=active` בלי worker → יוצר Docker Swarm service
-- טלפון כבר לא active → מוריד את ה-service
-- **Image:** `${REGISTRY_HOST}:5000/provisioner:latest` (registry פרטי)
-- **חייב לרוץ על manager node** (צריך docker.sock)
+### spine_runtime
+מצב פעיל — איזה call רץ עכשיו לאיזה phone+contact. Spine משתמש בזה כדי לנתב הודעות נכנסות ל-Worker הנכון.
 
-### 4. Scheduler (APScheduler)
+| עמודה | תיאור |
+|---|---|
+| call_id | PK, FK → spine_calls |
+| phone_id | טלפון |
+| contact_id | איש קשר |
+| current_step | צעד נוכחי |
+| worker_service | שם ה-Docker service |
+| status | active / waiting / completed |
 
-Job שבודק טבלת `schedules`, קורא ל-Spine `POST /api/spine/dispatch` כשמגיע זמן.
+### spine_events
+לוג אירועים מ-Workers — init, step_start, timeout, error. ל-debug.
 
-- **Image:** `${REGISTRY_HOST}:5000/scheduler:latest` (registry פרטי)
+### spine_webhooks
+רישום webhook לכל טלפון לפי סוג אירוע. Spine נרשם מול ה-Agent (Baileys) לקבלת הודעות נכנסות.
 
-## טבלאות Supabase חדשות
+| עמודה | תיאור |
+|---|---|
+| phone_id | טלפון |
+| event_type | message / status_update / connection / all |
+| callback_url | URL ש-Agent קורא אליו |
+| agent_url | URL של ה-Agent |
 
-### `phone_workers`
-| עמודה | סוג | תיאור |
-|---|---|---|
-| phone_id | TEXT PK | מזהה טלפון |
-| service_name | TEXT | שם ה-Docker service (worker-{phone_id}) |
-| replicas | INT | מספר replicas |
-| status | TEXT | pending / running / stopped / error |
-| image | TEXT | Docker image |
+### spine_notifications
+התראות — call_started, call_ended, message_failed, timeout, error.
 
-### `spine_calls`
-כל הרצה של סצנריו עם איש קשר.
+## API
 
-| עמודה | סוג | תיאור |
-|---|---|---|
-| call_id | TEXT PK | מזהה ההרצה |
-| scenario_id | TEXT | איזה סצנריו רץ |
-| phone_id | TEXT | מאיזה טלפון |
-| contact_id | TEXT | לאיזה איש קשר |
-| status | TEXT | running / completed / failed / expired |
-| started_at | TIMESTAMPTZ | מתי התחיל |
-| finished_at | TIMESTAMPTZ | מתי נגמר |
-| duration_seconds | INT | משך בשניות |
-| sender_count | INT | כמה הודעות הבוט שלח |
-| expected_count | INT | כמה תשובות התקבלו |
-| mismatch_count | INT | כמה תשובות לא תאמו |
+### Spine — Call Management
+```
+POST   /calls                          יצירת call חדש + snapshot
+GET    /calls/{call_id}                call + leaves
+PATCH  /calls/{call_id}                עדכון סטטוס
+POST   /calls/{call_id}/summary        Worker שולח סיכום
+```
 
-### `spine_leaves`
-כל הודעה בודדת בתוך call.
+### Spine — Send (→ Agent)
+```
+POST   /send/{phone_id}               שולח WhatsApp דרך Agent
+                                       stores spine_messages
+                                       links leaf ↔ message
+```
 
-| עמודה | סוג | תיאור |
-|---|---|---|
-| leaf_id | TEXT PK | מזהה |
-| call_id | TEXT FK | שייך ל-call |
-| type | TEXT | Sender (בוט שלח) / Expected (ממתין לתשובה) |
-| content | TEXT | תוכן ההודעה |
-| wa_type | TEXT | text / buttons / list / button_reply |
-| status | TEXT | Pending → Sent → Matched / Mismatched / Timeout |
+### Spine — Incoming (← Agent)
+```
+POST   /incoming/{phone_id}           Agent שולח הודעה נכנסת
+                                       → יש call פעיל? forward ל-Worker
+                                       → אין? store + notification
+```
 
-### `spine_events`
-לוג אירועים מ-Workers (init, step_start, timeout, error). בעיקר ל-debug.
+### Spine — Worker Events
+```
+POST   /events                        לוג אירועים
+POST   /leaves                        leaf חדש
+PATCH  /leaves/{leaf_id}/status        עדכון + link ל-message
+POST   /heartbeat                     Worker alive
+```
 
-## התקנה
+### Spine — Webhooks
+```
+POST   /webhooks                      רישום webhook
+GET    /webhooks/{phone_id}           רשימת webhooks
+DELETE /webhooks/{id}                 הסרה
+POST   /webhooks/register-agent/{id}  רישום אוטומטי מול Agent
+```
 
-### שלב 1 — Supabase
-הריצו `migration.sql` ב-SQL Editor.
+### Spine — React API
+```
+GET    /api/phones/{phone_id}/active              אנשי קשר + last call
+GET    /api/phones/{id}/contacts/{id}/calls       כל ההרצות
+GET    /api/calls/{call_id}                       call + leaves
+GET    /api/calls/{call_id}/leaves                live poll
+GET    /api/calls/{call_id}/messages              messages מקושרים
+GET    /api/workers                               רשימת workers
+```
 
-### שלב 2 — FastAPI
+### Spine — Notifications
+```
+GET    /notifications/{phone_id}                  רשימה
+PATCH  /notifications/{id}/read                   סמן כנקרא
+```
+
+## React — ActiveChatsScreen
+
+3 פאנלים:
+1. **אנשי קשר** — רשימת contacts עם tag=active, אווטאר, סטטוס שיחה אחרונה
+2. **שיחות** — כל ה-calls (הרצות scenario) לאיש קשר שנבחר
+3. **צ'אט** — leaves כבועות WhatsApp. Sender=ירוק/ימין, Expected=לבן/שמאל
+
+Live poll כל 2 שניות ל-calls עם status=running.
+
+קורא דרך `apiFetch("/spine/api/...")` → vid.michal proxy → Spine.
+
+## Deploy
+
+### 1. Supabase
 ```bash
-# העתיקו spine.py ל-routers/
-cp spine.py /home/lior/projects/github/whatsapp-single/fastapi/routers/
+# הריצו migration.sql ב-SQL Editor
+```
 
+### 2. vid.michal-solutions.com
+```bash
+# שימו vid_michal_spine.py → routers/spine.py
 # הוסיפו ל-main.py:
-# from routers import spine
-# app.include_router(spine.router, prefix="/api")
-
-# restart
-sudo systemctl restart fastapi.service
+#   from routers import spine
+#   app.include_router(spine.router, prefix="/api")
+# הוסיפו ל-.env:
+#   SPINE_URL=http://127.0.0.1:8100
 ```
 
-### שלב 3 — React
+### 3. React
 ```bash
-# העתיקו את הקומפוננטה
-cp ActiveChatsScreen.jsx src/screens/
-
-# הוסיפו טאב ב-PhoneDetail:
-# import ActiveChatsScreen from "./screens/ActiveChatsScreen";
-# { label: "שיחות פעילות", component: <ActiveChatsScreen phone={phone} /> }
+# שימו ActiveChatsScreen.jsx → src/screens/
+# הוסיפו טאב ב-PhoneDetail
 ```
 
-### שלב 4 — Private Registry
+### 4. Private Registry
 ```bash
-# על כל node (manager + workers):
-sudo tee /etc/docker/daemon.json << EOF
-{ "insecure-registries": ["10.0.0.5:5000"] }
-EOF
+# על כל node:
+echo '{"insecure-registries":["10.0.0.5:5000"]}' | sudo tee /etc/docker/daemon.json
 sudo systemctl restart docker
 
-# הוסיפו ל-.env:
+# ב-.env:
 REGISTRY_HOST=10.0.0.5
 ```
 
-### שלב 5 — Build & Push
+### 5. Build Spine
 ```bash
-# Provisioner
-docker build -t ${REGISTRY_HOST}:5000/provisioner:latest ./provisioner/
-docker push ${REGISTRY_HOST}:5000/provisioner:latest
-
-# Scheduler
-docker build -t ${REGISTRY_HOST}:5000/scheduler:latest ./scheduler/
-docker push ${REGISTRY_HOST}:5000/scheduler:latest
-
-# Worker (ציבורי, כבר ב-Hub)
-docker push liorgr/worker-scenario-runtime:latest
+cd spine
+docker build -t ${REGISTRY_HOST}:5000/data-spine:latest .
+docker push ${REGISTRY_HOST}:5000/data-spine:latest
 ```
 
-### שלב 6 — Deploy
+### 6. Deploy Stack
 ```bash
 docker stack deploy -c docker-compose.yml scenario
 ```
 
 ## Images
 
-| Image | Registry | גישה |
-|---|---|---|
-| `liorgr/worker-scenario-runtime:latest` | Docker Hub | ציבורי |
-| `provisioner:latest` | `${REGISTRY_HOST}:5000` | פרטי |
-| `scheduler:latest` | `${REGISTRY_HOST}:5000` | פרטי |
+| Image | Registry |
+|---|---|
+| liorgr/worker-scenario-runtime:latest | Docker Hub (ציבורי) |
+| data-spine:latest | ${REGISTRY_HOST}:5000 (פרטי) |
+| provisioner:latest | ${REGISTRY_HOST}:5000 (פרטי) |
+| scheduler:latest | ${REGISTRY_HOST}:5000 (פרטי) |
 
-## זרימת הודעה
+## זרימת הודעה יוצאת
 
 ```
-1. Scheduler/React → POST /api/spine/dispatch
-   ↓
-2. Spine → POST http://worker-{phone_id}:9000/webhook/event (init)
-   ↓
+1. Scheduler → POST /calls (Spine יוצר call + snapshot)
+2. Spine → POST Worker:9000/webhook/event (init + scenario JSON)
 3. Worker מריץ סצנריו:
-   ├── שולח הודעה ל-WhatsApp (via Baileys)
-   ├── POST /api/spine/leaves (type=Sender, status=Sent)
-   ├── מחכה לתשובה
-   ├── תשובה מגיעה
-   ├── POST /api/spine/leaves (type=Expected, status=Matched)
-   └── ...חוזר עד סוף הסצנריו
-   ↓
-4. Worker → POST /api/spine/calls/{id}/summary
-   ↓
-5. React polls GET /api/spine/calls/{id}/leaves → מציג בועות צ'אט
+   a. Worker → POST Spine /send/{phone_id} (שלח הודעה)
+   b. Spine → POST Agent:3001/send/text (Baileys → WhatsApp)
+   c. Spine stores spine_messages + links leaf ↔ message
+   d. Worker → POST Spine /leaves (leaf type=Sender)
 ```
 
-## ENV Reference
+## זרימת הודעה נכנסת
+
+```
+1. WhatsApp → Baileys Agent
+2. Agent → POST Spine /incoming/{phone_id}
+3. Spine checks spine_runtime: יש call פעיל לcontact?
+   כן → forward ל-Worker:9000/webhook/event (entryMessage)
+   לא → store message + notification
+4. Worker → POST Spine /leaves (leaf type=Expected, status=Matched)
+5. Worker → PATCH Spine /leaves/{id}/status (link message)
+```
+
+## ENV
 
 ### Worker
 ```env
 PHONE_ID=972504476645
 SERVICE_NAME=worker-972504476645
 PORT=9000
-SPINE_URL=https://vid.michal-solutions.com/api/spine
-DENO_BIN=/usr/local/bin/deno
-DENO_TMPDIR=/tmp/deno-scripts
+SPINE_URL=http://scenario_data-spine:8000
+```
+
+### Spine
+```env
+SUPABASE_URL=...
+SUPABASE_SERVICE_KEY=...
+SPINE_SELF_URL=http://scenario_data-spine:8000
 ```
 
 ### Provisioner
@@ -231,14 +305,11 @@ DENO_TMPDIR=/tmp/deno-scripts
 SUPABASE_URL=...
 SUPABASE_SERVICE_KEY=...
 SWARM_NETWORK=scenario_spine-net
-SPINE_URL=https://vid.michal-solutions.com/api/spine
+SPINE_URL=http://scenario_data-spine:8000
 WORKER_IMAGE=liorgr/worker-scenario-runtime:latest
 ```
 
-### Scheduler
+### vid.michal
 ```env
-SUPABASE_URL=...
-SUPABASE_SERVICE_KEY=...
-SPINE_URL=https://vid.michal-solutions.com/api/spine
-CHECK_INTERVAL_SECONDS=30
+SPINE_URL=http://127.0.0.1:8100
 ```

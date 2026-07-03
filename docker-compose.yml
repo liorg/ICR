@@ -1,9 +1,4 @@
 # docker stack deploy -c docker-compose.yml scenario
-#
-# .env:
-#   REGISTRY_HOST=10.0.0.5  (IP of manager node)
-#   SUPABASE_URL=...
-#   SUPABASE_SERVICE_KEY=...
 
 version: "3.9"
 
@@ -17,7 +12,6 @@ volumes:
 
 services:
 
-  # ── Private Registry (manager node) ───────────────────────────────────────
   registry:
     image: registry:2
     ports:
@@ -28,7 +22,20 @@ services:
       placement:
         constraints: [node.role == manager]
 
-  # ── Provisioner (Go) — creates Worker services ───────────────────────────
+  data-spine:
+    image: ${REGISTRY_HOST}:5000/data-spine:latest
+    networks: [spine-net]
+    environment:
+      SUPABASE_URL:         "${SUPABASE_URL}"
+      SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
+      SPINE_SELF_URL:       "http://scenario_data-spine:8000"
+    ports:
+      - "8100:8000"
+    deploy:
+      replicas: 1
+      restart_policy: { condition: on-failure, delay: 5s }
+      update_config: { order: start-first }
+
   provisioner:
     image: ${REGISTRY_HOST}:5000/provisioner:latest
     networks: [spine-net]
@@ -36,7 +43,7 @@ services:
       SUPABASE_URL:         "${SUPABASE_URL}"
       SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
       SWARM_NETWORK:        "scenario_spine-net"
-      SPINE_URL:            "https://vid.michal-solutions.com/api/spine"
+      SPINE_URL:            "http://scenario_data-spine:8000"
       WORKER_IMAGE:         "liorgr/worker-scenario-runtime:latest"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -44,12 +51,11 @@ services:
       placement:
         constraints: [node.role == manager]
 
-  # ── Scheduler (APScheduler) — triggers Spine dispatch ────────────────────
   scheduler:
     image: ${REGISTRY_HOST}:5000/scheduler:latest
     networks: [spine-net]
     environment:
       SUPABASE_URL:         "${SUPABASE_URL}"
       SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
-      SPINE_URL:            "https://vid.michal-solutions.com/api/spine"
+      SPINE_URL:            "http://scenario_data-spine:8000"
       CHECK_INTERVAL_SECONDS: "30"

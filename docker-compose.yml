@@ -1,0 +1,55 @@
+# docker stack deploy -c docker-compose.yml scenario
+#
+# .env:
+#   REGISTRY_HOST=10.0.0.5  (IP of manager node)
+#   SUPABASE_URL=...
+#   SUPABASE_SERVICE_KEY=...
+
+version: "3.9"
+
+networks:
+  spine-net:
+    driver: overlay
+    attachable: true
+
+volumes:
+  registry_data:
+
+services:
+
+  # ── Private Registry (manager node) ───────────────────────────────────────
+  registry:
+    image: registry:2
+    ports:
+      - "5000:5000"
+    volumes:
+      - registry_data:/var/lib/registry
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
+  # ── Provisioner (Go) — creates Worker services ───────────────────────────
+  provisioner:
+    image: ${REGISTRY_HOST}:5000/provisioner:latest
+    networks: [spine-net]
+    environment:
+      SUPABASE_URL:         "${SUPABASE_URL}"
+      SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
+      SWARM_NETWORK:        "scenario_spine-net"
+      SPINE_URL:            "https://vid.michal-solutions.com/api/spine"
+      WORKER_IMAGE:         "liorgr/worker-scenario-runtime:latest"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+
+  # ── Scheduler (APScheduler) — triggers Spine dispatch ────────────────────
+  scheduler:
+    image: ${REGISTRY_HOST}:5000/scheduler:latest
+    networks: [spine-net]
+    environment:
+      SUPABASE_URL:         "${SUPABASE_URL}"
+      SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
+      SPINE_URL:            "https://vid.michal-solutions.com/api/spine"
+      CHECK_INTERVAL_SECONDS: "30"

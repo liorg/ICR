@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"time"
 
@@ -22,7 +20,6 @@ type Phone struct {
 }
 
 type PhoneWorker struct {
-	ID          string `json:"id,omitempty"`
 	PhoneID     string `json:"phone_id"`
 	ServiceName string `json:"service_name"`
 	Replicas    int    `json:"replicas"`
@@ -31,39 +28,32 @@ type PhoneWorker struct {
 }
 
 var (
-	supabaseClient *supa.Client
-	dockerClient   *client.Client
-	network        string
-	spineURL       string
-	workerImage    string
-	pollInterval   = 30 * time.Second
+	db          *supa.Client
+	docker      *client.Client
+	network     string
+	spineURL    string
+	workerImage string
+	interval    = 30 * time.Second
 )
 
 func main() {
-	supabaseURL := mustEnv("SUPABASE_URL")
-	supabaseKey := mustEnv("SUPABASE_SERVICE_KEY")
+	db = supa.CreateClient(mustEnv("SUPABASE_URL"), mustEnv("SUPABASE_SERVICE_KEY"))
+
+	var err error
+	docker, err = client.NewClientWithOpts(client.FromEnv)
+	if err != nil {
+		log.Fatalf("Docker: %v", err)
+	}
+	docker.NegotiateAPIVersion(context.Background())
+
 	network = envOr("SWARM_NETWORK", "scenario_spine-net")
 	spineURL = envOr("SPINE_URL", "http://scenario_data-spine:8000")
 	workerImage = envOr("WORKER_IMAGE", "liorgr/worker-scenario-runtime:latest")
 
-	supabaseClient = supa.CreateClient(supabaseURL, supabaseKey)
-
-	var err error
-	dockerClient, err = client.NewClientWithOpts(client.FromEnv)
-	if err != nil {
-		log.Fatalf("Docker client: %v", err)
-	}
-	dockerClient.NegotiateAPIVersion(context.Background())
-
-	log.Printf("Provisioner started | network=%s spine=%s image=%s interval=%s",
-		network, spineURL, workerImage, pollInterval)
-
-	// Run immediately, then every pollInterval
-	tick := time.NewTicker(pollInterval)
-	defer tick.Stop()
+	log.Printf("Provisioner started | network=%s spine=%s image=%s", network, spineURL, workerImage)
 
 	reconcile()
-	for range tick.C {
+	for range time.Tick(interval) {
 		reconcile()
 	}
 }
@@ -71,90 +61,92 @@ func main() {
 func reconcile() {
 	ctx := context.Background()
 
-	// 1. Get all phones with status=active
+	// 1. Active phones
 	var phones []Phone
-	err := supabaseClient.DB.From("phones").
-		Select("id, phone_number, status").
-		Eq("status", "active").
-		Execute(&phones)
+	err := db.DB.From("phones").Select("id, phone_number, status").Eq("status", "active").Execute(&phones)
 	if err != nil {
-		log.Printf("ERROR fetching phones: %v", err)
+		log.Printf("ERROR phones: %v", err)
 		return
 	}
 
-	// 2. Get existing workers
+	// 2. Existing workers
 	var workers []PhoneWorker
-	err = supabaseClient.DB.From("phone_workers").
-		Select("*").
-		Execute(&workers)
-	if err != nil {
-		log.Printf("ERROR fetching workers: %v", err)
-		return
-	}
+	_ = db.DB.From("phone_workers").Select("*").Execute(&workers)
 
-	existingMap := map[string]*PhoneWorker{}
+	existing := map[string]*PhoneWorker{}
 	for i := range workers {
-		existingMap[workers[i].PhoneID] = &workers[i]
+		existing[workers[i].PhoneID] = &workers[i]
 	}
 
-	// 3. For each active phone without a worker → create one
+	// 3. Create missing workers
 	for _, phone := range phones {
-		if w, exists := existingMap[phone.ID]; exists {
-			// Already has a worker — check if service still exists
-			if w.Status == "running" {
-				continue
-			}
-			// Status is not running — try to recreate
-			log.Printf("Worker for %s status=%s, recreating", phone.ID, w.Status)
+		w, exists := existing[phone.ID]
+
+		if exists && w.Status == "running" {
+			continue
 		}
 
-		svcName := fmt.Sprintf("worker-%s", phone.ID)
-		log.Printf("Creating worker | phone=%s service=%s", phone.ID, svcName)
+		// Service name: worker-{phone_number}-{phone_id[:8]}
+		shortID := phone.ID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		svcName := fmt.Sprintf("worker-%s-%s", phone.PhoneNumber, shortID)
 
-		err := createSwarmService(ctx, svcName, phone.ID)
+		log.Printf("Creating worker | phone=%s number=%s service=%s", phone.ID, phone.PhoneNumber, svcName)
+
+		err := createService(ctx, svcName, phone.ID, phone.PhoneNumber)
 		if err != nil {
-			log.Printf("ERROR creating service %s: %v", svcName, err)
+			log.Printf("ERROR create %s: %v", svcName, err)
 			upsertWorker(phone.ID, svcName, "error")
 			continue
 		}
 
 		upsertWorker(phone.ID, svcName, "running")
-		log.Printf("Worker created | phone=%s service=%s", phone.ID, svcName)
+		log.Printf("Worker created | service=%s", svcName)
 	}
 
-	// 4. Remove workers for phones that are no longer active
+	// 4. Remove workers for inactive phones
 	activeMap := map[string]bool{}
 	for _, p := range phones {
 		activeMap[p.ID] = true
 	}
 	for _, w := range workers {
 		if !activeMap[w.PhoneID] && w.Status == "running" {
-			log.Printf("Phone %s no longer active, removing worker %s", w.PhoneID, w.ServiceName)
-			removeSwarmService(ctx, w.ServiceName)
+			log.Printf("Removing worker %s (phone %s no longer active)", w.ServiceName, w.PhoneID)
+			_ = docker.ServiceRemove(ctx, w.ServiceName)
 			upsertWorker(w.PhoneID, w.ServiceName, "stopped")
 		}
 	}
 }
 
-func createSwarmService(ctx context.Context, name, phoneID string) error {
+func createService(ctx context.Context, name, phoneID, phoneNumber string) error {
+	// Check if exists
+	if _, _, err := docker.ServiceInspectWithRaw(ctx, name, types.ServiceInspectOptions{}); err == nil {
+		log.Printf("Service %s already exists, skipping", name)
+		return nil
+	}
+
 	replicas := uint64(1)
 
 	spec := swarm.ServiceSpec{
 		Annotations: swarm.Annotations{
 			Name: name,
 			Labels: map[string]string{
-				"managed-by": "provisioner",
-				"phone-id":   phoneID,
+				"managed-by":   "provisioner",
+				"phone-id":     phoneID,
+				"phone-number": phoneNumber,
 			},
 		},
 		TaskTemplate: swarm.TaskSpec{
 			ContainerSpec: &swarm.ContainerSpec{
 				Image: workerImage,
 				Env: []string{
-					fmt.Sprintf("PHONE_ID=%s", phoneID),
-					fmt.Sprintf("SERVICE_NAME=%s", name),
+					"PHONE_ID=" + phoneID,
+					"PHONE_NUMBER=" + phoneNumber,
+					"SERVICE_NAME=" + name,
 					"PORT=9000",
-					fmt.Sprintf("SPINE_URL=%s", spineURL),
+					"SPINE_URL=" + spineURL,
 					"DENO_BIN=/usr/local/bin/deno",
 					"DENO_TMPDIR=/tmp/deno-scripts",
 				},
@@ -171,60 +163,42 @@ func createSwarmService(ctx context.Context, name, phoneID string) error {
 		},
 	}
 
-	_, err := dockerClient.ServiceCreate(ctx, spec, types.ServiceCreateOptions{})
+	_, err := docker.ServiceCreate(ctx, spec, types.ServiceCreateOptions{})
 	return err
 }
 
-func removeSwarmService(ctx context.Context, name string) {
-	err := dockerClient.ServiceRemove(ctx, name)
-	if err != nil {
-		log.Printf("WARN removing service %s: %v", name, err)
-	}
-}
-
 func upsertWorker(phoneID, serviceName, status string) {
-	w := PhoneWorker{
-		PhoneID:     phoneID,
-		ServiceName: serviceName,
-		Replicas:    1,
-		Status:      status,
-		Image:       workerImage,
-	}
-
-	// Try update first, then insert
 	var existing []PhoneWorker
-	_ = supabaseClient.DB.From("phone_workers").
-		Select("id").
-		Eq("phone_id", phoneID).
-		Execute(&existing)
+	_ = db.DB.From("phone_workers").Select("phone_id").Eq("phone_id", phoneID).Execute(&existing)
 
 	if len(existing) > 0 {
-		_ = supabaseClient.DB.From("phone_workers").
-			Update(map[string]interface{}{
-				"service_name": serviceName,
-				"status":       status,
-				"updated_at":   time.Now().UTC().Format(time.RFC3339),
-			}).
-			Eq("phone_id", phoneID).
-			Execute(nil)
+		_ = db.DB.From("phone_workers").Update(map[string]interface{}{
+			"service_name": serviceName,
+			"status":       status,
+			"updated_at":   time.Now().UTC().Format(time.RFC3339),
+		}).Eq("phone_id", phoneID).Execute(nil)
 	} else {
-		_ = supabaseClient.DB.From("phone_workers").
-			Insert(w).
-			Execute(nil)
+		_ = db.DB.From("phone_workers").Insert(PhoneWorker{
+			PhoneID:     phoneID,
+			ServiceName: serviceName,
+			Replicas:    1,
+			Status:      status,
+			Image:       workerImage,
+		}).Execute(nil)
 	}
 }
 
-func mustEnv(key string) string {
-	v := os.Getenv(key)
+func mustEnv(k string) string {
+	v := os.Getenv(k)
 	if v == "" {
-		log.Fatalf("Missing required env: %s", key)
+		log.Fatalf("Missing: %s", k)
 	}
 	return v
 }
 
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
+func envOr(k, d string) string {
+	if v := os.Getenv(k); v != "" {
 		return v
 	}
-	return fallback
+	return d
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -20,9 +21,9 @@ var (
 )
 
 type Phone struct {
-	ID          string `json:"id"`
-	PhoneNumber string `json:"phone_number"`
-	Status      string `json:"status"`
+	ID     string `json:"id"`
+	Number string `json:"number"`
+	Status string `json:"status"`
 }
 
 type PhoneWorker struct {
@@ -40,25 +41,44 @@ func main() {
 
 	log.Printf("Provisioner started | network=%s spine=%s image=%s", network, spineURL, workerImage)
 
-	reconcile()
-	for range time.Tick(30 * time.Second) {
-		reconcile()
+	for {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("PANIC in reconcile: %v", r)
+				}
+			}()
+			reconcile()
+		}()
+		time.Sleep(30 * time.Second)
 	}
 }
 
 func reconcile() {
-	phones := supabaseGet("phones?select=id,phone_number,status&status=eq.active")
-	var phoneList []Phone
-	json.Unmarshal(phones, &phoneList)
+	log.Println("Reconcile starting...")
 
-	workers := supabaseGet("phone_workers?select=phone_id,service_name,status")
+	phonesRaw := supabaseGet("phones?select=id,number,status&status=eq.active")
+	log.Printf("Phones response: %s", string(phonesRaw))
+
+	var phoneList []Phone
+	if err := json.Unmarshal(phonesRaw, &phoneList); err != nil {
+		log.Printf("ERROR unmarshal phones: %v | raw: %s", err, string(phonesRaw))
+		return
+	}
+
+	workersRaw := supabaseGet("phone_workers?select=phone_id,service_name,status")
 	var workerList []PhoneWorker
-	json.Unmarshal(workers, &workerList)
+	if err := json.Unmarshal(workersRaw, &workerList); err != nil {
+		log.Printf("ERROR unmarshal workers: %v", err)
+		workerList = []PhoneWorker{}
+	}
 
 	existing := map[string]*PhoneWorker{}
 	for i := range workerList {
 		existing[workerList[i].PhoneID] = &workerList[i]
 	}
+
+	log.Printf("Reconcile | phones=%d workers=%d", len(phoneList), len(workerList))
 
 	for _, phone := range phoneList {
 		w, exists := existing[phone.ID]
@@ -66,15 +86,16 @@ func reconcile() {
 			continue
 		}
 
+		cleanNum := strings.TrimPrefix(phone.Number, "+")
 		shortID := phone.ID
 		if len(shortID) > 8 {
 			shortID = shortID[:8]
 		}
-		svcName := fmt.Sprintf("worker-%s-%s", phone.PhoneNumber, shortID)
+		svcName := fmt.Sprintf("worker-%s-%s", cleanNum, shortID)
 
-		log.Printf("Creating worker | phone=%s number=%s service=%s", phone.ID, phone.PhoneNumber, svcName)
+		log.Printf("Creating worker | phone=%s number=%s service=%s", phone.ID, cleanNum, svcName)
 
-		err := createService(svcName, phone.ID, phone.PhoneNumber)
+		err := createService(svcName, phone.ID, cleanNum)
 		if err != nil {
 			log.Printf("ERROR create %s: %v", svcName, err)
 			upsertWorker(phone.ID, svcName, "error")
@@ -85,7 +106,6 @@ func reconcile() {
 		log.Printf("Worker created | service=%s", svcName)
 	}
 
-	// Remove workers for inactive phones
 	activeMap := map[string]bool{}
 	for _, p := range phoneList {
 		activeMap[p.ID] = true
@@ -97,10 +117,11 @@ func reconcile() {
 			upsertWorker(w.PhoneID, w.ServiceName, "stopped")
 		}
 	}
+
+	log.Println("Reconcile done")
 }
 
 func createService(name, phoneID, phoneNumber string) error {
-	// Check if exists
 	if err := exec.Command("docker", "service", "inspect", name).Run(); err == nil {
 		log.Printf("Service %s already exists", name)
 		return nil
@@ -129,14 +150,17 @@ func createService(name, phoneID, phoneNumber string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %s", err, string(out))
 	}
+	log.Printf("docker service create output: %s", string(out))
 	return nil
 }
 
-// ── Supabase HTTP ────────────────────────────────────────────────────────
-
 func supabaseGet(path string) []byte {
 	url := supabaseURL + "/rest/v1/" + path
-	req, _ := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Printf("Request build error: %v", err)
+		return []byte("[]")
+	}
 	req.Header.Set("apikey", supabaseKey)
 	req.Header.Set("Authorization", "Bearer "+supabaseKey)
 
@@ -147,43 +171,50 @@ func supabaseGet(path string) []byte {
 	}
 	defer resp.Body.Close()
 
-	body := make([]byte, 0)
-	buf := make([]byte, 4096)
-	for {
-		n, err := resp.Body.Read(buf)
-		body = append(body, buf[:n]...)
-		if err != nil {
-			break
-		}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Body read error: %v", err)
+		return []byte("[]")
 	}
+
+	if resp.StatusCode != 200 {
+		log.Printf("Supabase %d: %s", resp.StatusCode, string(body))
+		return []byte("[]")
+	}
+
 	return body
 }
 
 func upsertWorker(phoneID, serviceName, status string) {
-	// Check if exists
 	data := supabaseGet("phone_workers?select=phone_id&phone_id=eq." + phoneID)
-	exists := len(data) > 5 // more than "[]"
+	exists := len(data) > 5
 
+	var method, url, payload string
 	if exists {
-		// PATCH
-		url := supabaseURL + "/rest/v1/phone_workers?phone_id=eq." + phoneID
-		payload := fmt.Sprintf(`{"service_name":"%s","status":"%s","updated_at":"%s"}`,
+		method = "PATCH"
+		url = supabaseURL + "/rest/v1/phone_workers?phone_id=eq." + phoneID
+		payload = fmt.Sprintf(`{"service_name":"%s","status":"%s","updated_at":"%s"}`,
 			serviceName, status, time.Now().UTC().Format(time.RFC3339))
-		req, _ := http.NewRequest("PATCH", url, strings.NewReader(payload))
-		req.Header.Set("apikey", supabaseKey)
-		req.Header.Set("Authorization", "Bearer "+supabaseKey)
-		req.Header.Set("Content-Type", "application/json")
-		http.DefaultClient.Do(req)
 	} else {
-		// POST
-		url := supabaseURL + "/rest/v1/phone_workers"
-		payload := fmt.Sprintf(`{"phone_id":"%s","service_name":"%s","status":"%s","replicas":1,"image":"%s"}`,
+		method = "POST"
+		url = supabaseURL + "/rest/v1/phone_workers"
+		payload = fmt.Sprintf(`{"phone_id":"%s","service_name":"%s","status":"%s","replicas":1,"image":"%s"}`,
 			phoneID, serviceName, status, workerImage)
-		req, _ := http.NewRequest("POST", url, strings.NewReader(payload))
-		req.Header.Set("apikey", supabaseKey)
-		req.Header.Set("Authorization", "Bearer "+supabaseKey)
-		req.Header.Set("Content-Type", "application/json")
-		http.DefaultClient.Do(req)
+	}
+
+	req, _ := http.NewRequest(method, url, strings.NewReader(payload))
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("Upsert worker error: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("Upsert worker %d: %s", resp.StatusCode, string(body))
 	}
 }
 

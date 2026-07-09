@@ -1,40 +1,65 @@
 version: "3.9"
+
 networks:
-  spine-net: { driver: overlay, attachable: true }
+  spine-net:
+    driver: overlay
+    attachable: true
+
 volumes:
   registry_data:
+
 services:
+
   registry:
     image: registry:2
-    ports: ["5000:5000"]
-    volumes: [registry_data:/var/lib/registry]
-    deploy: { placement: { constraints: [node.role == manager] } }
+    ports:
+      - "5000:5000"
+    volumes:
+      - registry_data:/var/lib/registry
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+
   data-spine:
     image: ${REGISTRY_HOST}:5000/data-spine:latest
-    networks: [spine-net]
+    networks:
+      - spine-net
     environment:
       SUPABASE_URL: "${SUPABASE_URL}"
       SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
       SPINE_SELF_URL: "http://scenario_data-spine:8000"
-    ports: ["8001:8000"]
+    ports:
+      - "8001:8000"
     deploy:
       replicas: 1
-      restart_policy: { condition: on-failure }
-      update_config: { order: start-first }
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+      update_config:
+        order: start-first
+
   provisioner:
     image: ${REGISTRY_HOST}:5000/provisioner:latest
-    networks: [spine-net]
+    networks:
+      - spine-net
     environment:
       SUPABASE_URL: "${SUPABASE_URL}"
       SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
       SWARM_NETWORK: "scenario_spine-net"
       SPINE_URL: "http://scenario_data-spine:8000"
       WORKER_IMAGE: "liorgr/worker-scenario-runtime:latest"
-    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
-    deploy: { placement: { constraints: [node.role == manager] } }
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+
   scheduler:
     image: ${REGISTRY_HOST}:5000/scheduler:latest
-    networks: [spine-net]
+    networks:
+      - spine-net
     environment:
       SUPABASE_URL: "${SUPABASE_URL}"
       SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"

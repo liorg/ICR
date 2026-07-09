@@ -160,3 +160,10 @@ Provisioner חייב manager node (צריך docker.sock).
 - auto-refresh כל 5 שניות
 - תמיכה: text, image, audio, file, buttons, button_reply
 - RTL
+
+
+# שינוי קוד → build + update:
+./build.sh
+
+# שינוי compose/env → deploy:
+./deploy.sh

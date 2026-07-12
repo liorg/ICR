@@ -2,50 +2,43 @@
 set -euo pipefail
 cd /opt/ICR
 
-# טעינת משתני הסביבה
 if [ -f .env ]; then
-  set -a
-  source .env
-  set +a
+    set -a
+    source .env
+    set +a
 fi
 
 REGISTRY="${REGISTRY_HOST:-10.186.0.3}"
 TAG="${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}"
-STACK_NAME="scenario"
+STACK_NAME="${STACK_NAME:-scenario}"
 
 echo "================================"
 echo "Registry: ${REGISTRY}:5000"
 echo "Tag:      ${TAG}"
-echo "Stack:    ${STACK_NAME}"
 echo "================================"
 
 echo "Building spine..."
-docker build -t "${REGISTRY}:5000/data-spine:${TAG}" ./spine/
-
-echo "Pushing spine..."
+docker build -t "${REGISTRY}:5000/data-spine:${TAG}" -t "${REGISTRY}:5000/data-spine:latest" ./spine/
 docker push "${REGISTRY}:5000/data-spine:${TAG}"
+docker push "${REGISTRY}:5000/data-spine:latest"
 
 echo "Building provisioner..."
-docker build -t "${REGISTRY}:5000/provisioner:${TAG}" ./provisioner/
-
-echo "Pushing provisioner..."
+docker build -t "${REGISTRY}:5000/provisioner:${TAG}" -t "${REGISTRY}:5000/provisioner:latest" ./provisioner/
 docker push "${REGISTRY}:5000/provisioner:${TAG}"
+docker push "${REGISTRY}:5000/provisioner:latest"
 
-echo "Deploying Docker Stack..."
-docker stack deploy \
-  --with-registry-auth \
-  --resolve-image always \
-  -c docker-compose.yml \
-  "${STACK_NAME}"
+echo "Building scheduler..."
+docker build -t "${REGISTRY}:5000/scheduler:${TAG}" -t "${REGISTRY}:5000/scheduler:latest" ./scheduler/
+docker push "${REGISTRY}:5000/scheduler:${TAG}"
+docker push "${REGISTRY}:5000/scheduler:latest"
 
-echo "Updating services with new image..."
-docker service update \
-  --image "${REGISTRY}:5000/data-spine:${TAG}" \
-  "${STACK_NAME}_data-spine"
+echo "Deploying stack..."
+docker stack deploy --with-registry-auth --resolve-image always -c docker-compose.yml "${STACK_NAME}"
 
-docker service update \
-  --image "${REGISTRY}:5000/provisioner:${TAG}" \
-  "${STACK_NAME}_provisioner"
+echo "Updating services..."
+docker service update --image "${REGISTRY}:5000/data-spine:${TAG}" "${STACK_NAME}_data-spine"
+docker service update --image "${REGISTRY}:5000/provisioner:${TAG}" "${STACK_NAME}_provisioner"
+docker service update --image "${REGISTRY}:5000/scheduler:${TAG}" "${STACK_NAME}_scheduler"
 
 echo "================================"
 echo "Deployed — tag: ${TAG}"

@@ -30,8 +30,5 @@ jobs:
           command_timeout: 20m
           script: |
             cd /opt/ICR
-            echo "REGISTRY_HOST=10.186.0.3" > .env
-            echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> .env
-            echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}" >> .env
             chmod +x deploy.sh
             ./deploy.sh

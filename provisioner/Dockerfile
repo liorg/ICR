@@ -6,4 +6,4 @@ RUN CGO_ENABLED=0 go build -o /provisioner .
 
 FROM docker:27-cli
 COPY --from=build /provisioner /provisioner
-ENTRYPOINT ["/provisioner"]
+ENTRYPOINT ["/provisioner"] 

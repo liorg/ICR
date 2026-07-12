@@ -162,8 +162,9 @@ Provisioner חייב manager node (צריך docker.sock).
 - RTL
 
 
-# שינוי קוד → build + update:
-./build.sh
 
 # שינוי compose/env → deploy:
 ./deploy.sh
+
+# clear
+docker service ls --filter label=managed-by=provisioner -q | xargs docker service rm

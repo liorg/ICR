@@ -28,14 +28,10 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_KEY }}
           command_timeout: 20m
-          envs: SUPABASE_URL,SUPABASE_SERVICE_KEY
           script: |
             cd /opt/ICR
             echo "REGISTRY_HOST=10.186.0.3" > .env
-            echo "SUPABASE_URL=$SUPABASE_URL" >> .env
-            echo "SUPABASE_SERVICE_KEY=$SUPABASE_SERVICE_KEY" >> .env
+            echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> .env
+            echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}" >> .env
             chmod +x deploy.sh
             ./deploy.sh
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

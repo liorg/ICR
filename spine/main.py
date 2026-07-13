@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from dependencies import get_supabase
-from routers import calls, send, incoming, worker_events, dispatch
+from routers import send, incoming, worker_events, dispatch
 
 log = logging.getLogger("spine")
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(name)s — %(message)s", datefmt="%H:%M:%S")
@@ -86,7 +86,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Data Spine", version="3.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.include_router(calls.router)                     # /calls/{id}
 app.include_router(send.router)                      # /send/{phone_id}          ← Worker
 app.include_router(incoming.router)                  # /incoming                 ← HostAgent
 app.include_router(worker_events.router)             # /events /leaves

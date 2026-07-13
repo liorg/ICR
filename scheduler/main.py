@@ -48,14 +48,20 @@ def fire_schedule(sched) -> bool:
                 "source":      "scheduler",
             }, timeout=15)
 
-            # 201 = נוצר ורץ | 202 = יש call פעיל → נכנס לתור. שניהם הצלחה.
-            if resp.status_code in (201, 202):
+            # 201 = נוצר ורץ. תזמון לא נכנס לתור — רק טריגר.
+            if resp.status_code == 201:
                 ok += 1
                 log.info("Dispatch %s | schedule=%s contact=%s",
                          resp.json().get("code"), sched["id"], contact["id"])
+
             elif resp.status_code == 409:
-                # contact לא active — לא כישלון של ה-schedule.
+                # CALL_ALREADY_ACTIVE — שיחה פעילה, התזמון נחסם בכוונה.
+                # CONTACT_NOT_ACTIVE  — draft contact.
+                # שניהם החלטה תקינה של המערכת, לא תקלה → אין retry.
+                code = resp.json().get("code")
+                log.info("Skipped %s | schedule=%s contact=%s", code, sched["id"], contact["id"])
                 ok += 1
+
             else:
                 log.error("Dispatch rejected | schedule=%s contact=%s status=%s body=%s",
                           sched["id"], contact["id"], resp.status_code, resp.text[:200])

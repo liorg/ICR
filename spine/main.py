@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from dependencies import get_supabase
-from routers import calls, send, incoming, worker_events, conversations, notifications, dispatch
+from routers import calls, send, incoming, worker_events, dispatch
 
 log = logging.getLogger("spine")
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(name)s — %(message)s", datefmt="%H:%M:%S")
@@ -86,13 +86,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Data Spine", version="3.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.include_router(calls.router)
-app.include_router(send.router)
-app.include_router(incoming.router)
-app.include_router(worker_events.router)
-app.include_router(conversations.router, prefix="/api")
-app.include_router(notifications.router)
-app.include_router(dispatch.router, prefix="/api")   # ← היה חסר. ה-Scheduler קורא ל-/api/dispatch
+app.include_router(calls.router)                     # /calls/{id}
+app.include_router(send.router)                      # /send/{phone_id}          ← Worker
+app.include_router(incoming.router)                  # /incoming                 ← HostAgent
+app.include_router(worker_events.router)             # /events /leaves
+                                                     # /workers/heartbeat        ← Worker
+                                                     # /calls/{id}/summary       ← Worker (סוגר call + מקדם תור)
+app.include_router(dispatch.router, prefix="/api")   # /api/calls/ensure         ← Scheduler + incoming
+                                                     # היה חסר לגמרי: ה-Scheduler קיבל 404 בכל ירייה.
 
 
 @app.get("/")

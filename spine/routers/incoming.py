@@ -13,7 +13,7 @@ Direction נגזר מ-`DispatchAsync(..., isIncoming)` ב-WebhookController:
 יצירת calls עוברת אך ורק דרך dispatch.ensure_core → spine_ensure_call.
 אין כאן INSERT ל-calls. מסלול יצירה שני היה שובר את ה-invariant.
 """
-import logging
+import os, logging
 from typing import Optional
 
 import httpx
@@ -25,6 +25,10 @@ from routers.dispatch import ensure_core, EnsureReq
 
 router = APIRouter(prefix="/incoming", tags=["incoming"])
 log = logging.getLogger("spine.incoming")
+
+# scenarios.status — 'draft' (ברירת מחדל) | 'active' (מפורסם).
+# שים לב: לא אותו דבר כמו contacts.tag == 'active'. אותה מילה, טבלאות שונות.
+PUBLISHED = os.getenv("SCENARIO_PUBLISHED_STATUS", "active")
 
 
 class DispatchPayload(BaseModel):
@@ -84,29 +88,29 @@ async def handle_incoming(p: DispatchPayload):
         return {"ok": True, "routed": True,
                 "call_id": active[0]["id"], "delivered": delivered}
 
-    # ── אין שיחה פעילה → auto-trigger לפי תוכן ────────────────────────
-    if not content:
-        return {"ok": True, "routed": False, "reason": "no_content"}
-
+    # ── אין שיחה פעילה → התרחישים של איש הקשר הזה ─────────────────────
+    # scenarios קשורה ישירות ל-(phone_id, contact_id). אין חיפוש לפי תוכן
+    # ההודעה ואין התאמת מילות מפתח — הקוד הקודם סינן על auto_trigger /
+    # auto_trigger_enabled, עמודות שלא קיימות בסכמה בכלל.
     scenarios = db.table("scenarios") \
-        .select("id, priority, auto_trigger") \
+        .select("id, priority") \
         .eq("phone_id", p.phone_id) \
-        .eq("auto_trigger_enabled", True) \
+        .eq("contact_id", p.contact_id) \
+        .eq("status", PUBLISHED) \
+        .eq("event_type", "trigger") \
         .order("priority").execute().data or []
 
-    matched = [sc for sc in scenarios
-               if sc.get("auto_trigger") and sc["auto_trigger"].lower() in content.lower()]
+    if not scenarios:
+        log.info("[ROUTE] no published trigger scenario | phone=%s contact=%s",
+                 p.phone_id, p.contact_id)
+        return {"ok": True, "routed": False, "reason": "no_trigger_scenario"}
 
-    if not matched:
-        log.info("[ROUTE] no trigger match | phone=%s contact=%s", p.phone_id, p.contact_id)
-        return {"ok": True, "routed": False, "reason": "no_trigger_match"}
-
-    # ── כל התאמה → ensure_core. ה-unique index מכריע מי running ומי queued.
+    # כל תרחיש → ensure_core. ה-unique index מכריע מי running ומי queued.
     # אין כאן "הראשון רץ" — ה-DB עושה את זה, אטומית, גם מול טריגר מקביל.
-    first_message = {"type": msg_type, "data": {"text": content}}
+    first_message = {"type": msg_type, "data": {"text": content}} if content else None
     created = []
 
-    for sc in matched:
+    for sc in scenarios:
         code, body = await ensure_core(EnsureReq(
             phone_id=p.phone_id,
             contact_id=p.contact_id,

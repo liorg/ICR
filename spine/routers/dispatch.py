@@ -98,9 +98,16 @@ async def ensure_core(req: "EnsureReq") -> tuple[int, dict]:
     }).execute().data
 
     log.info("[ENSURE] %s | phone=%s contact=%s call=%s",
-             res["code"], req.phone_id, req.contact_id, res["call_id"])
+             res["code"], req.phone_id, req.contact_id, res.get("call_id"))
 
-    # queued → לא נשלח ל-worker. יורם ב-spine_complete_call.
+    # ── blocked → scheduler/api בזמן שיחה פעילה. לא נכנס לתור. ────────
+    if res["status"] == "blocked":
+        log.info("[ENSURE] %s | phone=%s contact=%s source=%s active=%s",
+                 res["code"], req.phone_id, req.contact_id, req.source,
+                 res.get("active_call_id"))
+        return 409, res
+
+    # queued → רק trigger. יורם ב-spine_complete_call.
     if res["status"] == "queued":
         return 202, res
 

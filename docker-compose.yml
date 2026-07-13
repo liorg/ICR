@@ -28,7 +28,26 @@ services:
     environment:
       SUPABASE_URL: "${SUPABASE_URL}"
       SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
+
+      # ── Workers → Spine (בתוך ה-overlay) ─────────────────────────────
       SPINE_SELF_URL: "http://scenario_data-spine:8000"
+
+      # ── HostAgent → Spine ────────────────────────────────────────────
+      # ה-HostAgent הוא systemd על מכונה נפרדת (10.186.0.2) ואינו ברשת
+      # ה-overlay — הוא לא יכול לפתור "scenario_data-spine".
+      # חייב להיות ה-IP של ה-Swarm + הפורט המפורסם (8001:8000 למטה).
+      SPINE_CALLBACK_URL: "${SPINE_CALLBACK_URL:-http://10.186.0.3:8001}"
+
+      # ── Spine → HostAgent ────────────────────────────────────────────
+      HOST_AGENT_URL: "${HOST_AGENT_URL:-http://10.186.0.2:5000}"
+      # הנתיב בקונטרולר השליחה. {phone_id} ו-{type} מוחלפים בזמן ריצה.
+      HOST_AGENT_SEND_PATH: "${HOST_AGENT_SEND_PATH:-/api/messages/{phone_id}/send/{type}}"
+
+      # ── רישום ה-webhook ──────────────────────────────────────────────
+      # חייב להתאים בדיוק ל-WebhookRegistrationType.Trigger ב-HostAgent,
+      # כי GetActiveWebhooksByTypeAsync מסנן לפי המחרוזת הזו בלבד.
+      WEBHOOK_TYPE: "trigger"
+      REGISTER_INTERVAL_SECONDS: "60"
     ports:
       - "8001:8000"
     deploy:

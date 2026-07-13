@@ -31,7 +31,7 @@ log = logging.getLogger("spine.dispatch")
 class EnsureReq(BaseModel):
     phone_id:      str
     contact_id:    str
-    scenario_id:   Optional[str] = None      # None → הכי דחוף שמפורסם
+    scenario_id:   str                       # חובה. אין בחירה אוטומטית כאן.
     priority:      Optional[int] = None
     source:        str = "trigger"           # trigger | scheduler | api
     first_message: Optional[dict] = None
@@ -75,15 +75,11 @@ async def ensure_core(req: "EnsureReq") -> tuple[int, dict]:
     if contact.get("tag") != "active":
         return 409, {"code": "CONTACT_NOT_ACTIVE", "message": f"tag={contact.get('tag')}"}
 
-    # ── בחירת התרחיש ──────────────────────────────────────────────────
-    if req.scenario_id:
-        sc = db.table("scenarios").select("id, config, priority") \
-               .eq("id", req.scenario_id).maybe_single().execute().data
-    else:
-        rows = db.table("scenarios").select("id, config, priority") \
-                 .eq("phone_id", req.phone_id).eq("is_published", True) \
-                 .order("priority").limit(1).execute().data
-        sc = rows[0] if rows else None
+    # ── התרחיש. scenario_id הוא חובה — הבחירה נעשית אצל הקורא.
+    # (ה-else שהיה כאן בחר תרחיש שרירותי לפי priority והריץ אותו
+    #  על איש קשר אמיתי. כל קריאה בלי scenario_id הייתה הפעלה עיוורת.)
+    sc = db.table("scenarios").select("id, config, priority") \
+           .eq("id", req.scenario_id).maybe_single().execute().data
 
     if not sc:
         return 404, {"code": "NO_SCENARIO"}

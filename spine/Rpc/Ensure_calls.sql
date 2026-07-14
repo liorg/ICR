@@ -48,7 +48,7 @@ returns jsonb
 language plpgsql
 as $$
 declare
-    v_call_id    text := 'call-' || substr(replace(gen_random_uuid()::text,'-',''), 1, 12);
+    v_call_id    uuid := gen_random_uuid();   -- calls.id הוא uuid
     v_active     record;
     v_constraint text;
 begin
@@ -117,7 +117,7 @@ $$;
 -- ה-slot לא מתפנה לרגע: ensure מקביל ימתין עד שהקידום הושלם.
 -- ═══════════════════════════════════════════════════════════════════════
 create or replace function spine_complete_call(
-    p_call_id text,
+    p_call_id uuid,
     p_status  text default 'completed'
 )
 returns jsonb

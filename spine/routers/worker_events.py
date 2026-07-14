@@ -155,15 +155,15 @@ def heartbeat(hb: HeartbeatIn):
 async def ingest_summary(call_id: str, s: SummaryIn):
     db = get_supabase()
 
-    db.table("spine_calls").upsert({
-        "call_id": call_id, "scenario_id": s.scenario_id,
-        "phone_id": s.phone_id, "contact_id": s.contact_id,
-        "status": s.status, "started_at": s.started_at,
-        "finished_at": s.finished_at, "duration_seconds": s.duration_seconds,
-        "last_step_id": s.last_step_id, "variables": s.variables,
-        "sender_count": s.sender_count, "expected_count": s.expected_count,
-        "mismatch_count": s.mismatch_count,
-    }, on_conflict="call_id").execute()
+    # spine_calls נמחקה — שדות ה-summary יושבים ישירות על calls.
+    db.table("calls").update({
+        "duration_seconds": s.duration_seconds,
+        "last_step_id":     s.last_step_id,
+        "variables":        s.variables,
+        "sender_count":     s.sender_count,
+        "expected_count":   s.expected_count,
+        "mismatch_count":   s.mismatch_count,
+    }).eq("id", call_id).execute()
 
     if s.leaves:
         rows = [{

@@ -14,15 +14,15 @@ Worker → Spine. הנתיבים כאן חייבים להתאים *בדיוק* �
 ה-summary הוא אות הסיום של התרחיש — ולכן הוא גם מה שסוגר את ה-call
 ומקדם את הבא בתור. ה-Worker לא צריך לדעת על התור בכלל.
 """
-import json, logging
+import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-import httpx
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from dependencies import get_supabase
+from services.calls import complete_call, send_to_worker
 
 router = APIRouter(tags=["worker-events"])
 log = logging.getLogger("spine.worker")
@@ -181,59 +181,18 @@ async def ingest_summary(call_id: str, s: SummaryIn):
             db.table("spine_leaves").upsert(rows, on_conflict="leaf_id").execute()
 
     # ── סגירת ה-call + קידום הבא בתור ─────────────────────────────────
-    # בלי זה status נשאר 'running' לנצח, ה-partial unique index חוסם כל
-    # call עתידי לאותו contact, והתור לא מתקדם. ה-Worker לא יודע על התור.
-    try:
-        res = db.rpc("spine_complete_call", {
-            "p_call_id": call_id,
-            "p_status":  s.status or "completed",
-        }).execute().data or {}
-    except Exception as e:
-        log.error("[SUMMARY] complete_call failed | call=%s: %s", call_id, e)
-        res = {}
+    # ה-summary הוא אות הסיום של התרחיש. בלעדיו status נשאר 'running'
+    # לנצח, ה-partial unique index חוסם כל call עתידי לאותו contact,
+    # והתור לא מתקדם. ה-Worker לא יודע שקיים תור בכלל.
+    res = await complete_call(db, call_id, s.status or "completed")
 
-    log.info("[SUMMARY] call=%s status=%s dur=%ds → %s next=%s",
-             call_id, s.status, s.duration_seconds,
-             res.get("code"), res.get("next_call_id"))
+    # ה-Worker מופעל מה-response, לא מתוך ה-service.
+    if res.needs_worker:
+        res.with_delivery(await send_to_worker(db, res.phone_id, res.worker_payload))
+        log.info("[SUMMARY] next call dispatched | call=%s delivered=%s",
+                 res.body.get("next_call_id"), res.body.get("delivered"))
 
-    nxt = res.get("next_call_id")
-    if nxt:
-        await _init_next(db, nxt)
+    log.info("[SUMMARY] call=%s status=%s dur=%ds → %s",
+             call_id, s.status, s.duration_seconds, res.code)
 
-    return {"ok": True, "code": res.get("code"), "next_call_id": nxt}
-
-
-async def _init_next(db, call_id: str):
-    """דוחף ל-worker את ה-call שקודם מ-queued ל-running."""
-    row = db.table("calls") \
-        .select("id, phone_id, contact_id, scenario_id, scenario_snapshot") \
-        .eq("id", call_id).maybe_single().execute().data
-    if not row:
-        return
-
-    ct = db.table("contacts").select("id, phone, name") \
-           .eq("id", row["contact_id"]).maybe_single().execute().data or {}
-
-    w = db.table("phone_workers").select("service_name") \
-          .eq("phone_id", row["phone_id"]).eq("status", "running") \
-          .limit(1).execute().data
-    if not w:
-        log.warning("[SUMMARY] next call %s promoted but no worker | phone=%s",
-                    call_id, row["phone_id"])
-        return
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            await c.post(f"http://{w[0]['service_name']}:9000/webhook/event", json={
-                "typeEvent":     "init",
-                "call_id":       row["id"],
-                "contact_id":    row["contact_id"],
-                "contact_phone": ct.get("phone") or "",
-                "contact_name":  ct.get("name") or "",
-                "scenario_id":   row["scenario_id"],
-                "scenario_json": json.dumps(row.get("scenario_snapshot") or {}),
-                "first_message": None,
-            })
-        log.info("[SUMMARY] next call dispatched | call=%s", call_id)
-    except Exception as e:
-        log.error("[SUMMARY] next dispatch failed | call=%s: %s", call_id, e)
+    return {"ok": True, "code": res.code, "next_call_id": res.body.get("next_call_id")}

@@ -1,170 +1,231 @@
-# שיחות של אנשי קשר ACTIVE — מימוש
+# Data Spine — ארכיטקטורה ומיגרציה
 
-## ERD
+מסמך עבודה. מתעד את הסכמה, הזרימות, הבאגים שנמצאו והתיקונים.
+
+---
+
+## 1. מפת המערכת
+
+ה-Spine הוא **reverse proxy דו-כיווני**. שני מישורים, כל אחד עם "ספר כתובות" משלו.
 
 ```
-phones (קיים)
-  ├── 1:1 → phone_workers           Go provisioner יוצר
-  ├── 1:N → contacts (tag=active)
-  │           ├── 1:N → calls        + scenario_snapshot (JSONB)
-  │           │          ├── 1:N → messages  + call_id
-  │           │          └── 1:N → spine_leaves
-  │           │                       └── N:N → messages (via spine_leaf_messages)
-  │           └── 1:N → messages
-  └── (spine_events — לוג)
+   Worker  ──(2)──►  SPINE  ──(3)──►  HostAgent  ──►  Baileys
+      ◄───(1)───            ◄──(4)───
 ```
 
-## קבצים
+| # | כיוון | ספר כתובות | מי ממלא | היה |
+|---|-------|-----------|---------|-----|
+| 1 | Spine → Worker | `phone_workers.service_name` | Provisioner (כל 30ש') | ✅ |
+| 2 | Worker → Spine | `SPINE_URL` (env) | קבוע | ✅ |
+| 3 | Spine → HostAgent | `HOST_AGENT_URL` (env) | קבוע | ❌ היה `spine_webhooks` — ריקה |
+| 4 | HostAgent → Spine | `webhook_registrations` | **ה-Spine עצמו** | ❌ אף אחד לא רשם |
 
-| קובץ | לאן | מה עושה |
-|---|---|---|
-| `migration.sql` | Supabase SQL Editor | 2 עמודות + 4 טבלאות |
-| `active_chats.py` | `routers/active_chats.py` ב-vid.michal | API endpoints |
-| `ActiveChatsScreen.jsx` | `src/screens/` ב-React | UI — contacts → messages |
-| `provisioner_main.go` | `provisioner/main.go` | Go — יוצר Workers |
-| `provisioner_Dockerfile` | `provisioner/Dockerfile` | |
-| `provisioner_go.mod` | `provisioner/go.mod` | |
-| `erd.html` | פתח בדפדפן | דיאגרמת טבלאות |
+**מכונות:** Swarm = `10.186.0.3` · HostAgent = `10.186.0.2` (systemd, **לא ב-overlay**).
+לכן ה-callback חייב להיות `http://10.186.0.3:8001` ולא `scenario_data-spine`.
 
-## התקנה
+---
 
-### 1. Supabase
-```sql
--- הריצו migration.sql ב-SQL Editor
--- מוסיף: calls.scenario_snapshot, messages.call_id
--- יוצר: phone_workers, spine_leaves, spine_leaf_messages, spine_events
+## 2. שלושת מקורות הטריגר
+
+כולם מתכנסים ל-`services/calls.py::ensure_call`.
+
+```
+HostAgent ──► /incoming ─┐
+Scheduler ───────────────┼──► ensure_call ──► spine_ensure_call ──► Worker
+API ─────────────────────┘                          ▲
+                                        advisory lock + unique index
 ```
 
-### 2. FastAPI (vid.michal-solutions.com)
-```python
-# העתיקו active_chats.py → routers/active_chats.py
+**`incoming` מחליט · `dispatch` מבצע.** ההפרדה הזו היא מה שמאפשר לאכוף invariant יחיד.
 
-# main.py — הוסיפו:
-from routers import active_chats
-app.include_router(active_chats.router, prefix="/api")
+---
+
+## 3. ה-invariant
+
+> תמיד **≤ 1 call פעיל** לכל `(phone_id, contact_id)`.
+
+נאכף ב-DB בשתי שכבות:
+
+| שכבה | תפקיד |
+|------|-------|
+| `uniq_running_call_per_contact` (partial unique index על `status='running'`) | האמת הסופית. מחזיק גם מול כתיבה ידנית. |
+| `spine_lock_slot()` — advisory lock על `(phone,contact)` | מסרלל `ensure` ↔ `complete`. |
+
+**למה ה-index לבדו לא מספיק:**
+
+```
+complete_call:  UPDATE running → completed     ← ה-slot התפנה
+                                                 ← ensure נכנס, תופס running
+                SELECT next queued → promote    ← unique_violation, קורס
+```
+השיחה החדשה עוקפת את התור. ה-advisory lock סוגר את החלון.
+
+### התנהגות לפי `source`
+
+| `source` | יש call פעיל | תוצאה |
+|----------|--------------|-------|
+| כל אחד | לא | **201** `CALL_CREATED` |
+| `trigger` | כן | **202** `CALL_QUEUED` (לפי `priority`) |
+| `scheduler` / `api` | כן | **409** `CALL_ALREADY_ACTIVE` — **נחסם** |
+
+**למה תזמון לא נכנס לתור:** תרחיש שרץ חצי שעה היה צובר עשרות calls מתוזמנים, וכולם היו נורים ברצף בסיום. מפולת. טריגר הוא תגובה להודעה אמיתית — הוא כן ממתין.
+
+---
+
+## 4. Endpoints
+
+| נתיב | קורא | הערה |
+|------|------|------|
+| `POST /incoming` | HostAgent | ה-callback היחיד |
+| `POST /send/{phone_id}` | Worker | |
+| `POST /events` · `/leaves` · `PATCH /leaves/{id}/status` | Worker | |
+| `POST /workers/heartbeat` | Worker | **היה `/heartbeat` = 404** |
+| `POST /calls/{id}/summary` | Worker | **סוגר call + מקדם תור** |
+| `POST /api/calls/ensure` | Scheduler + incoming | |
+| `POST /api/calls/{id}/complete` | ידני | |
+| `POST /api/dispatch` · `/dispatch/message` | legacy | |
+
+---
+
+## 5. חוזי ה-payload
+
+### HostAgent → Spine (`WebhookDispatchPayload`, PascalCase)
+```json
+{ "MessageId": "uuid", "PhoneId": "uuid", "ContactId": "uuid", "Direction": true }
+```
+`Direction` נגזר מ-`DispatchAsync(..., isIncoming)`:
+- `true` → **נכנסת**
+- `false` → **יוצאת** (fromMe)
+
+> ה-logger ב-`WebhookDispatcherService` מדפיס `"outgoing"` כש-`Direction=true` — **ההדפסה הפוכה, לא הערך.**
+
+### Spine → Worker (`WorkerEventEnvelope`)
+```json
+{ "typeEvent": "init" | "entryMessage",
+  "call_id": "uuid", "scenario_id": "uuid",
+  "contact_id": "uuid", "contact_phone": "", "contact_name": "",
+  "scenario_json": "<JSON string>", "first_message": {} }
+```
+`HandleInit` מוודא `call_id`. **`HandleEntryMessage` לא** — ולכן `call_id` חסר שם נכשל בשקט.
+
+---
+
+## 6. הסכמה — נקודות שנשרפות עליהן
+
+| מה שנראה הגיוני | האמת |
+|------------------|------|
+| `contacts.phone` | **`contacts.number`** (+ `lid`) |
+| `scenarios.is_published` | **`scenarios.status = 'active'`** |
+| `scenarios.auto_trigger_enabled` | **לא קיים.** הקישור הוא `(phone_id, contact_id)` |
+| `schedules.next_run_at` | **`schedules.next_run`** |
+| `schedules.interval_seconds` | **`cron_expr`** (JSON string) |
+| `spine_calls` | **לא קיימת מעולם.** שדות ה-summary → `calls` |
+| `calls.id` הוא text | **`uuid`** |
+
+**`contacts.tag = 'active'` ≠ `scenarios.status = 'active'`.** אותה מילה, שתי משמעויות.
+
+---
+
+## 7. הבאגים שנמצאו
+
+| # | באג | השפעה |
+|---|-----|-------|
+| 1 | `spine_webhooks` לעולם לא מתמלאת | **אפס רישומים.** אין הודעות נכנסות, כל שליחה 404 |
+| 2 | `incoming` דרש `contact_phone`, קיבל IDs | **422 על כל הודעה** |
+| 3 | `/workers/heartbeat` היה `/heartbeat` | `phone_workers.status` לא עודכן → **אף dispatch לא נשלח** |
+| 4 | `spine_calls` לא קיימת | **כל summary נכשל בשקט** |
+| 5 | `dispatch` ייצר `call_id` בלי INSERT | ה-call לא היה קיים ב-DB |
+| 6 | `incoming` סינן על `auto_trigger_enabled` | **אף טריגר לא נורה** |
+| 7 | `contacts.phone` → `None` | `contact_phone=""` → **כל תרחיש מת בצעד הראשון** |
+| 8 | `dispatch.router` לא רשום ב-`main.py` | **Scheduler קיבל 404 בכל ירייה** |
+| 9 | `direction` הפוך בין Spine ל-HostAgent | בועות בצד הלא נכון |
+| 10 | `call_id` חסר ב-`entryMessage` | ה-Worker מנתב בלי הקשר לשיחה |
+| 11 | `str(config)` במקום `json.dumps` | **JSON לא חוקי** |
+| 12 | הודעה יוצאת מדליקה תרחיש | **לולאת feedback אינסופית** |
+
+---
+
+## 8. מיגרציה
+
+### SQL — לפי הסדר
+```
+1. 00_schema.sql       עמודות + אינדקסים + unique על webhook_registrations
+2. ensure_call.sql     advisory lock + spine_ensure_call + spine_complete_call
+3. schedules_v2.sql    spine_compute_next_run + claim + close + schedule_calls
 ```
 
-### 3. React (Vercel)
-```jsx
-// העתיקו ActiveChatsScreen.jsx → src/screens/
+### קוד
+| קובץ | יעד |
+|------|-----|
+| `main.py` | `spine/main.py` |
+| `services_calls.py` | `spine/services/calls.py` ← **חדש** |
+| `dispatch.py` `incoming.py` `send.py` `worker_events.py` | `spine/routers/` |
+| `scheduler_main.py` | `scheduler/main.py` |
 
-// PhoneDetail — הוסיפו טאב:
-import ActiveChatsScreen from "./screens/ActiveChatsScreen";
-{ label: "שיחות", component: <ActiveChatsScreen phone={phone} /> }
-```
+**חובה:** `touch spine/services/__init__.py`
 
-### 4. Go Provisioner
+### מחיקה
 ```bash
-# מבנה:
-# provisioner/
-#   main.go       ← provisioner_main.go
-#   Dockerfile    ← provisioner_Dockerfile
-#   go.mod        ← provisioner_go.mod
-
-cd provisioner
-docker build -t ${REGISTRY_HOST}:5000/provisioner:latest .
-docker push ${REGISTRY_HOST}:5000/provisioner:latest
+rm spine/routers/calls.py          # מוזג ל-dispatch + worker_events
+rm spine/routers/webhook.py        # מוזג ל-worker_events
+rm spine/routers/webhooks.py       # spine_webhooks מת
+rm spine/routers/conversations.py  # read API — נצרך מה-DB
+rm spine/routers/notifications.py  # read API + טבלה שאף אחד לא כותב אליה
+rm spine/routers/calls_ensure.py   # טיוטה
+rm active_chats.py
 ```
 
-### 5. Deploy
+### `.env`
+```
+SPINE_CALLBACK_URL=http://10.186.0.3:8001
+HOST_AGENT_URL=http://10.186.0.2:5000
+HOST_AGENT_SEND_PATH=/api/messages/{phone_id}/send/{type}
+WEBHOOK_TYPE=trigger
+```
+
+---
+
+## 9. אימות אחרי deploy
+
 ```bash
-docker stack deploy -c docker-compose.yml scenario
+# ImportError?  (services/__init__.py חסר)
+docker service logs scenario_data-spine 2>&1 | grep -iE "importerror|modulenotfound"
+
+# מישור ה-HostAgent
+docker service logs scenario_data-spine 2>&1 | grep WEBHOOK
+# צפוי: [WEBHOOK] Upserted. url=http://10.186.0.3:8001/incoming type=trigger
+
+# מישור ה-Worker
+docker service logs scenario_data-spine 2>&1 | grep heartbeat
+
+# ה-HostAgent מגיע?  (מ-10.186.0.2)
+curl -s http://10.186.0.3:8001/
+
+# הדליקו הודעה אמיתית:
+journalctl -u whatsapp-manager.service -f | grep DISPATCH
+# צפוי: [DISPATCH][TRIGGER] → ... status=200
 ```
 
-## API Endpoints
+| תסמין | סיבה |
+|-------|------|
+| `status=422` | הסכמה לא תואמת |
+| אין `[DISPATCH]` בכלל | `WEBHOOK_TYPE` לא תואם ל-enum |
+| אין heartbeats | ה-Worker לא מגיע ל-Spine |
 
-```
-GET /api/active-chats/{phone_id}/contacts
-    → contacts active + last_call + last_message + counts
+---
 
-GET /api/active-chats/{phone_id}/contacts/{contact_id}/messages
-    → הודעות WhatsApp (messages table, direction: true=יוצא false=נכנס)
+## 10. פתוח
 
-GET /api/active-chats/{phone_id}/contacts/{contact_id}/calls
-    → כל ה-calls (הרצות scenario)
+| # | מה | השפעה |
+|---|-----|-------|
+| 🔴 | **`next_run` לא מחושב** ב-`create_schedule` / `update_schedule` | **אף תזמון לא יורה לעולם.** צריך `spine_compute_next_run` בשניהם |
+| 🔴 | **`runNow` לא מריץ כלום** — רק `update status='running'` | הכפתור ▶ משנה badge בלבד |
+| 🔴 | **`HOST_AGENT_SEND_PATH`** — ניחוש. הקובץ לא נראה מעולם | **כל שליחה 404** |
+| 🟡 | **Timezone** — `timestamp without time zone` מול `now()` | תזמון בהיסט של 3 שעות |
+| 🟡 | **`WEBHOOK_TYPE`** — `"trigger"` או `"Trigger"`? | אפס הודעות, אפס שגיאות |
+| 🟢 | `lid` מול `number` — מה ה-HostAgent מצפה? | נסגר עם קונטרולר השליחה |
+| 🟢 | `spine_leaves.status` — `'Sent'` או `'sent'`? | ה-counts יחזרו 0 |
+| 🟢 | `call_type` מול `source` — כפילות? | |
+| 🟢 | `cron_expr.days` — שמות עבריים או מספרים? | תזמון שבועי יחזיר `NULL` |
 
-GET /api/active-chats/calls/{call_id}/messages
-    → הודעות של call ספציפי (messages.call_id = X)
-
-GET /api/active-chats/calls/{call_id}/leaves
-    → צעדי scenario + message_ids מקושרים
-```
-
-## טבלאות
-
-### שינויים על קיימות
-- `calls` + `scenario_snapshot` (JSONB) — עותק של הסצנריו ברגע ההרצה
-- `messages` + `call_id` (TEXT) — מקשר הודעה ל-call (רבים ליחיד)
-
-### חדשות
-- `phone_workers` — Worker Docker service לכל טלפון
-- `spine_leaves` — צעד בסצנריו (Sender/Expected)
-- `spine_leaf_messages` — N:N leaf ↔ message
-- `spine_events` — לוג אירועים
-
-### לא צריך
-- ~~spine_calls~~ → משתמשים ב-`calls`
-- ~~spine_messages~~ → משתמשים ב-`messages`
-- ~~spine_runtime~~ → שואלים `calls WHERE status='running'`
-- ~~spine_notifications~~ → לא צריך
-
-## Go Provisioner
-
-רץ כל 30 שניות. בודק `phones WHERE status='active'` מול `phone_workers`.
-
-- טלפון active בלי worker → `docker service create`
-- טלפון כבר לא active → `docker service remove`
-
-שם service:
-```
-worker-{phone_number}-{phone_id[:8]}
-```
-
-דוגמה:
-```
-worker-972504476645-3beff8fa
-```
-
-Worker ENV:
-```env
-PHONE_ID=3beff8fa-xxxx-xxxx
-PHONE_NUMBER=972504476645
-SERVICE_NAME=worker-972504476645-3beff8fa
-SPINE_URL=http://scenario_data-spine:8000
-```
-
-Provisioner חייב manager node (צריך docker.sock).
-
-## React מסך
-
-2 פאנלים בסגנון WhatsApp:
-
-```
-┌──────────────────┬─────────────────────────────────┐
-│ אנשי קשר פעילים  │  Header: שם + טלפון             │
-│                  │                                 │
-│ ◉ לינוי          │  ── 05/07/2026 ──               │
-│   ✓ שלום...      │                                 │
-│                  │        שלום, אני הבוט    [ירוק] │
-│ ◉ דני            │  [לבן] היי                      │
-│   2 שיחות        │        תודה!             [ירוק] │
-│                  │                                 │
-│                  │  ── 06/07/2026 ──               │
-│                  │  [לבן] מה שלומך?                │
-└──────────────────┴─────────────────────────────────┘
-```
-
-- direction=true (בוט) → ירוק, ימין
-- direction=false (נכנס) → לבן, שמאל
-- מפריד תאריכים
-- auto-refresh כל 5 שניות
-- תמיכה: text, image, audio, file, buttons, button_reply
-- RTL
-
-
-
-# שינוי compose/env → deploy:
-./deploy.sh
-
-# clear
-docker service ls --filter label=managed-by=provisioner -q | xargs docker service rm
+**שום דבר מזה לא נבדק בריצה.** ה-Spine עקבי עם כל מה שנראה — אבל לא הורץ.

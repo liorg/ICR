@@ -109,7 +109,8 @@ def entry_payload(call_id, scenario_id, contact_id, message_id,
 async def ensure_call(db, phone_id: str, contact_id: str, scenario_id: str,
                       priority: Optional[int] = None,
                       source: str = "trigger",
-                      first_message: Optional[dict] = None) -> CallResult:
+                      first_message: Optional[dict] = None,
+                      schedule_id: Optional[str] = None) -> CallResult:
 
     contact = db.table("contacts").select("id, phone, name, tag") \
                 .eq("id", contact_id).maybe_single().execute().data
@@ -140,6 +141,7 @@ async def ensure_call(db, phone_id: str, contact_id: str, scenario_id: str,
         "p_snapshot":    snapshot,
         "p_priority":    prio,
         "p_source":      source,
+        "p_schedule_id": schedule_id,   # ← הקישור לטאב Calls של התזמון
     }).execute().data
 
     code   = res.get("code")

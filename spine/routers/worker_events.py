@@ -1,51 +1,65 @@
 """
-Worker → Spine. הנתיבים כאן חייבים להתאים *בדיוק* למה שה-Worker קורא:
+Worker → Spine.
+
+הנתיבים כאן חייבים להתאים בדיוק למה שה-Worker קורא:
 
     NotificationService   → POST  {SPINE_URL}/events
     RuntimeTreeService    → POST  {SPINE_URL}/leaves
-                          → PATCH {SPINE_URL}/leaves/{leafId}/status
-    WorkerRegistry        → POST  {SPINE_URL}/workers/heartbeat      ← היה /heartbeat = 404
-    SessionSummaryService → POST  {SPINE_URL}/calls/{callId}/summary ← לא היה קיים = 404
+                          → PATCH {SPINE_URL}/leaves/status
+    WorkerRegistry        → POST  {SPINE_URL}/workers/heartbeat
+    SessionSummaryService → POST  {SPINE_URL}/calls/{callId}/summary
 
-הקובץ הזה מחליף את worker_events.py הישן וגם את webhook.py (שהיה נכון אך
-לא רשום ב-main.py). איחוד: הנתיבים של webhook.py + קישור ה-leaf↔message
-של worker_events.py.
+זהות Leaf מורכבת משלושה שדות:
 
-ה-summary הוא אות הסיום של התרחיש — ולכן הוא גם מה שסוגר את ה-call
-ומקדם את הבא בתור. ה-Worker לא צריך לדעת על התור בכלל.
+    scenario_id + call_id + leaf_id
+
+לכן כל יצירה, upsert ועדכון של Leaf מתבצעים לפי שלושת השדות יחד.
+
+ה-Summary אינו מסנכרן Leaves מחדש.
+Leaves נשלחים בזמן אמת דרך POST /leaves ומתעדכנים דרך PATCH /leaves/status.
+
+ה-Summary הוא אות הסיום של התרחיש:
+הוא שומר נתוני סיכום, סוגר את ה-call ומקדם את הבא בתור.
+ה-Worker אינו צריך לדעת על ניהול התור.
 """
+
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from dependencies import get_supabase
 from services.calls import complete_call, send_to_worker
 
+
 router = APIRouter(tags=["worker-events"])
 log = logging.getLogger("spine.worker")
 
 
-def _now():
+def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 # ── Models ────────────────────────────────────────────────────────────
+
 class EventIn(BaseModel):
-    call_id: str = ""
+    call_id: str
     phone_id: Optional[str] = None
-    event_type: str = ""
+    event_type: str
     step_id: Optional[str] = None
     step_type: Optional[str] = None
     data: Optional[Any] = None
-    timestamp: str = ""
+    timestamp: Optional[str] = None
 
 
 class LeafIn(BaseModel):
-    leaf_id: str = ""
-    call_id: str = ""
+    # הזהות המלאה של ה-Leaf
+    scenario_id: str
+    call_id: str
+    leaf_id: str
+
     step_id: str = ""
     type: str = ""
     message_id: Optional[str] = None
@@ -57,8 +71,11 @@ class LeafIn(BaseModel):
 
 
 class LeafStatusIn(BaseModel):
-    leaf_id: Optional[str] = None
-    call_id: Optional[str] = None
+    # עדכון Leaf דורש את כל הזהות
+    scenario_id: str
+    call_id: str
+    leaf_id: str
+
     status: str
     message_id: Optional[str] = None
 
@@ -72,8 +89,8 @@ class HeartbeatIn(BaseModel):
 
 
 class SummaryIn(BaseModel):
-    call_id: str = ""
-    scenario_id: str = ""
+    call_id: str
+    scenario_id: str
     phone_id: str = ""
     contact_id: str = ""
     status: str = ""
@@ -82,117 +99,310 @@ class SummaryIn(BaseModel):
     duration_seconds: int = 0
     last_step_id: str = ""
     variables: Optional[dict] = None
-    leaves: Optional[list] = None
     sender_count: int = 0
     expected_count: int = 0
     mismatch_count: int = 0
 
 
-# ── Events / Leaves ───────────────────────────────────────────────────
+# ── Events ────────────────────────────────────────────────────────────
+
 @router.post("/events")
 def ingest_event(ev: EventIn):
     db = get_supabase()
+
     db.table("spine_events").insert({
-        "call_id": ev.call_id, "phone_id": ev.phone_id,
-        "event_type": ev.event_type, "step_id": ev.step_id,
-        "step_type": ev.step_type, "data": ev.data,
+        "call_id": ev.call_id,
+        "phone_id": ev.phone_id,
+        "event_type": ev.event_type,
+        "step_id": ev.step_id,
+        "step_type": ev.step_type,
+        "data": ev.data,
         "timestamp": ev.timestamp or _now(),
     }).execute()
+
     return {"ok": True}
 
+
+# ── Leaves ────────────────────────────────────────────────────────────
 
 @router.post("/leaves")
 def ingest_leaf(leaf: LeafIn):
+    """
+    יוצר Leaf חדש או מעדכן Leaf קיים.
+
+    Conflict מתרחש רק כאשר שלושת השדות זהים:
+
+        scenario_id + call_id + leaf_id
+    """
+
     db = get_supabase()
-    db.table("spine_leaves").upsert({
-        "leaf_id": leaf.leaf_id, "call_id": leaf.call_id,
-        "step_id": leaf.step_id, "type": leaf.type,
-        "message_id": leaf.message_id, "content": leaf.content,
-        "wa_type": leaf.wa_type, "status": leaf.status,
-        "timestamp": leaf.timestamp or _now(), "meta": leaf.meta,
-    }, on_conflict="leaf_id").execute()
-    return {"ok": True}
+
+    result = (
+        db.table("spine_leaves")
+        .upsert(
+            {
+                "scenario_id": leaf.scenario_id,
+                "call_id": leaf.call_id,
+                "leaf_id": leaf.leaf_id,
+                "step_id": leaf.step_id,
+                "type": leaf.type,
+                "message_id": leaf.message_id,
+                "content": leaf.content,
+                "wa_type": leaf.wa_type,
+                "status": leaf.status,
+                "timestamp": leaf.timestamp or _now(),
+                "meta": leaf.meta,
+            },
+            on_conflict="scenario_id,call_id,leaf_id",
+        )
+        .execute()
+    )
+
+    if not result.data:
+        log.warning(
+            "Leaf upsert returned no data | scenario=%s call=%s leaf=%s",
+            leaf.scenario_id,
+            leaf.call_id,
+            leaf.leaf_id,
+        )
+
+    return {
+        "ok": True,
+        "scenario_id": leaf.scenario_id,
+        "call_id": leaf.call_id,
+        "leaf_id": leaf.leaf_id,
+    }
 
 
-@router.patch("/leaves/{leaf_id}/status")
-def update_leaf(leaf_id: str, body: LeafStatusIn):
+@router.patch("/leaves/status")
+def update_leaf(body: LeafStatusIn):
+    """
+    מעדכן Leaf לפי הזהות המלאה שנשלחת ב-body:
+
+        scenario_id + call_id + leaf_id
+    """
+
     db = get_supabase()
-    patch = {"status": body.status}
-    if body.message_id:
+
+    patch = {
+        "status": body.status,
+    }
+
+    # message_id מתעדכן רק אם נשלח ערך.
+    # שליחת null אינה מוחקת message_id קיים.
+    if body.message_id is not None:
         patch["message_id"] = body.message_id
-    db.table("spine_leaves").update(patch).eq("leaf_id", leaf_id).execute()
 
-    # קישור leaf ↔ messages (היה רק ב-worker_events, נשמר)
+    result = (
+        db.table("spine_leaves")
+        .update(patch)
+        .eq("scenario_id", body.scenario_id)
+        .eq("call_id", body.call_id)
+        .eq("leaf_id", body.leaf_id)
+        .execute()
+    )
+
+    if not result.data:
+        log.warning(
+            "Leaf not found for status update | scenario=%s call=%s leaf=%s",
+            body.scenario_id,
+            body.call_id,
+            body.leaf_id,
+        )
+
+        raise HTTPException(
+            status_code=404,
+            detail="Leaf not found for the supplied scenario, call and leaf IDs",
+        )
+
+    # קישור Leaf ↔ Message
     if body.message_id:
-        res = db.table("messages").select("id") \
-                .eq("whatsapp_message_id", body.message_id).limit(1).execute()
-        if res.data:
+        message_result = (
+            db.table("messages")
+            .select("id")
+            .eq("whatsapp_message_id", body.message_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not message_result.data:
+            log.warning(
+                "Message not found for leaf link | "
+                "scenario=%s call=%s leaf=%s whatsapp_message_id=%s",
+                body.scenario_id,
+                body.call_id,
+                body.leaf_id,
+                body.message_id,
+            )
+        else:
+            internal_message_id = message_result.data[0]["id"]
+
             try:
-                db.table("spine_leaf_messages").insert({
-                    "leaf_id": leaf_id, "message_id": res.data[0]["id"],
-                }).execute()
+                (
+                    db.table("spine_leaf_messages")
+                    .upsert(
+                        {
+                            "scenario_id": body.scenario_id,
+                            "call_id": body.call_id,
+                            "leaf_id": body.leaf_id,
+                            "message_id": internal_message_id,
+                        },
+                        on_conflict=(
+                            "scenario_id,call_id,leaf_id,message_id"
+                        ),
+                    )
+                    .execute()
+                )
             except Exception:
-                pass
-    return {"ok": True}
+                log.exception(
+                    "Failed linking leaf to message | "
+                    "scenario=%s call=%s leaf=%s message=%s",
+                    body.scenario_id,
+                    body.call_id,
+                    body.leaf_id,
+                    internal_message_id,
+                )
+
+    return {
+        "ok": True,
+        "scenario_id": body.scenario_id,
+        "call_id": body.call_id,
+        "leaf_id": body.leaf_id,
+        "status": body.status,
+    }
 
 
 # ── Heartbeat ─────────────────────────────────────────────────────────
-# הנתיב הוא /workers/heartbeat — בדיוק כמו ב-WorkerRegistry.ReportAsync.
-# הנתיב הישן (/heartbeat) החזיר 404, ולכן phone_workers.status לא עודכן
-# ל-running, ולכן _worker_url החזיר None, ולכן שום dispatch לא הגיע.
+
 @router.post("/workers/heartbeat")
 def heartbeat(hb: HeartbeatIn):
+    """
+    הנתיב הוא /workers/heartbeat,
+    בדיוק כמו WorkerRegistry.ReportAsync.
+    """
+
     db = get_supabase()
-    db.table("phone_workers").update({
-        "status": "running" if hb.status == "online" else hb.status,
-        "updated_at": hb.updated_at or _now(),
-    }).eq("service_name", hb.service_name).execute()
-    return {"ok": True}
+
+    result = (
+        db.table("phone_workers")
+        .update({
+            "status": "running" if hb.status == "online" else hb.status,
+            "updated_at": hb.updated_at or _now(),
+        })
+        .eq("service_name", hb.service_name)
+        .execute()
+    )
+
+    if not result.data:
+        log.warning(
+            "Heartbeat worker not found | phone=%s service=%s",
+            hb.phone_id,
+            hb.service_name,
+        )
+
+    return {
+        "ok": True,
+        "phone_id": hb.phone_id,
+        "service_name": hb.service_name,
+    }
 
 
 # ── Summary = אות הסיום ───────────────────────────────────────────────
+
 @router.post("/calls/{call_id}/summary")
-async def ingest_summary(call_id: str, s: SummaryIn):
+async def ingest_summary(call_id: str, summary: SummaryIn):
+    """
+    ה-Summary הוא אות הסיום של התרחיש.
+
+    הוא אחראי רק על:
+
+    1. שמירת נתוני הסיכום על ה-call.
+    2. סגירת ה-call.
+    3. קידום ה-call הבא בתור.
+    4. שליחת ה-call הבא ל-Worker.
+
+    הוא אינו שומר או מעדכן Leaves.
+    """
+
+    if call_id != summary.call_id:
+        raise HTTPException(
+            status_code=400,
+            detail="call_id in URL does not match call_id in request body",
+        )
+
     db = get_supabase()
 
-    # spine_calls נמחקה — שדות ה-summary יושבים ישירות על calls.
-    db.table("calls").update({
-        "duration_seconds": s.duration_seconds,
-        "last_step_id":     s.last_step_id,
-        "variables":        s.variables,
-        "sender_count":     s.sender_count,
-        "expected_count":   s.expected_count,
-        "mismatch_count":   s.mismatch_count,
-    }).eq("id", call_id).execute()
+    call_result = (
+        db.table("calls")
+        .update({
+            "duration_seconds": summary.duration_seconds,
+            "last_step_id": summary.last_step_id,
+            "variables": summary.variables,
+            "sender_count": summary.sender_count,
+            "expected_count": summary.expected_count,
+            "mismatch_count": summary.mismatch_count,
+        })
+        .eq("id", call_id)
+        .eq("scenario_id", summary.scenario_id)
+        .execute()
+    )
 
-    if s.leaves:
-        rows = [{
-            "leaf_id":    lf.get("leaf_id")    or lf.get("leafId"),
-            "call_id":    call_id,
-            "step_id":    lf.get("step_id")    or lf.get("stepId"),
-            "type":       lf.get("type", ""),
-            "message_id": lf.get("message_id") or lf.get("messageId"),
-            "content":    lf.get("content"),
-            "wa_type":    lf.get("wa_type")    or lf.get("waType"),
-            "status":     lf.get("status", ""),
-            "timestamp":  lf.get("timestamp"),
-        } for lf in s.leaves if isinstance(lf, dict)]
-        if rows:
-            db.table("spine_leaves").upsert(rows, on_conflict="leaf_id").execute()
+    if not call_result.data:
+        log.warning(
+            "Call not found for summary | scenario=%s call=%s",
+            summary.scenario_id,
+            call_id,
+        )
 
-    # ── סגירת ה-call + קידום הבא בתור ─────────────────────────────────
-    # ה-summary הוא אות הסיום של התרחיש. בלעדיו status נשאר 'running'
-    # לנצח, ה-partial unique index חוסם כל call עתידי לאותו contact,
-    # והתור לא מתקדם. ה-Worker לא יודע שקיים תור בכלל.
-    res = await complete_call(db, call_id, s.status or "completed")
+        raise HTTPException(
+            status_code=404,
+            detail="Call not found for the supplied call_id and scenario_id",
+        )
 
-    # ה-Worker מופעל מה-response, לא מתוך ה-service.
-    if res.needs_worker:
-        res.with_delivery(await send_to_worker(db, res.phone_id, res.worker_payload))
-        log.info("[SUMMARY] next call dispatched | call=%s delivered=%s",
-                 res.body.get("next_call_id"), res.body.get("delivered"))
+    # ── סגירת ה-call + קידום הבא בתור ────────────────────────────────
+    #
+    # ה-Summary הוא אות הסיום של התרחיש.
+    #
+    # בלעדיו ה-call יישאר running, ה-partial unique index יחסום
+    # calls עתידיים לאותו contact והתור לא יתקדם.
+    #
+    # ה-Worker אינו יודע שקיים תור.
 
-    log.info("[SUMMARY] call=%s status=%s dur=%ds → %s",
-             call_id, s.status, s.duration_seconds, res.code)
+    completion_status = summary.status or "completed"
 
-    return {"ok": True, "code": res.code, "next_call_id": res.body.get("next_call_id")}
+    result = await complete_call(
+        db,
+        call_id,
+        completion_status,
+    )
+
+    # הפעלת ה-Worker נעשית לפי התוצאה של complete_call.
+    if result.needs_worker:
+        delivery = await send_to_worker(
+            db,
+            result.phone_id,
+            result.worker_payload,
+        )
+
+        result.with_delivery(delivery)
+
+        log.info(
+            "[SUMMARY] next call dispatched | call=%s delivered=%s",
+            result.body.get("next_call_id"),
+            result.body.get("delivered"),
+        )
+
+    log.info(
+        "[SUMMARY] scenario=%s call=%s status=%s duration=%ds result=%s",
+        summary.scenario_id,
+        call_id,
+        completion_status,
+        summary.duration_seconds,
+        result.code,
+    )
+
+    return {
+        "ok": True,
+        "code": result.code,
+        "next_call_id": result.body.get("next_call_id"),
+    }

@@ -79,8 +79,8 @@ def init_payload(call_id, contact, scenario_id, snapshot, first_message=None) ->
         "typeEvent":     "init",
         "call_id":       call_id,
         "contact_id":    contact.get("id"),
-        "contact_phone": contact.get("phone") or "",
-        "contact_name":  contact.get("name") or "",
+        "contact_phone": contact.get("lid") or contact.get("number") or "",
+        "contact_name":  contact.get("name") or contact.get("whatsapp_name") or "",
         "scenario_id":   scenario_id,
         "scenario_json": json.dumps(snapshot or {}),   # str(dict) = JSON לא חוקי
         "first_message": first_message,
@@ -112,7 +112,8 @@ async def ensure_call(db, phone_id: str, contact_id: str, scenario_id: str,
                       first_message: Optional[dict] = None,
                       schedule_id: Optional[str] = None) -> CallResult:
 
-    contact = db.table("contacts").select("id, phone, name, tag") \
+    # contacts.number — לא "phone". lid מועדף כשקיים (ווטסאפ מזהה לפיו).
+    contact = db.table("contacts").select("id, number, lid, name, tag") \
                 .eq("id", contact_id).maybe_single().execute().data
     if not contact:
         return CallResult(404, "CONTACT_NOT_FOUND", {"code": "CONTACT_NOT_FOUND"})
@@ -194,7 +195,7 @@ async def complete_call(db, call_id: str, status: str = "completed") -> CallResu
         log.error("[COMPLETE] promoted call %s not found", nxt)
         return CallResult(200, code, res, call_id)
 
-    contact = db.table("contacts").select("id, phone, name") \
+    contact = db.table("contacts").select("id, number, lid, name") \
                 .eq("id", row["contact_id"]).maybe_single().execute().data or {}
 
     return CallResult(

@@ -71,7 +71,7 @@ async def handle_incoming(p: DispatchPayload):
     wa_msg_id = msg.get("whatsapp_message_id") or p.message_id
 
     # ── שיחה פעילה → מעבירים את ההודעה, לא יוצרים call ────────────────
-    active = db.table("calls").select("id") \
+    active = db.table("calls").select("id, scenario_id") \
         .eq("phone_id", p.phone_id).eq("contact_id", p.contact_id) \
         .eq("status", "running").limit(1).execute().data
 
@@ -82,8 +82,9 @@ async def handle_incoming(p: DispatchPayload):
             return {"ok": True, "routed": False, "reason": "no_worker",
                     "call_id": active[0]["id"]}
 
-        delivered = await _forward(worker, p.contact_id, wa_msg_id,
-                                   msg_type, content, msg.get("metadata"))
+        delivered = await _forward(worker, active[0]["id"], active[0].get("scenario_id"),
+                                   p.contact_id, wa_msg_id, msg_type,
+                                   content, msg.get("metadata"))
         log.info("[ROUTE] → worker | call=%s delivered=%s", active[0]["id"], delivered)
         return {"ok": True, "routed": True,
                 "call_id": active[0]["id"], "delivered": delivered}
@@ -145,13 +146,21 @@ def _worker(db, phone_id: str) -> Optional[str]:
     return f"http://{r[0]['service_name']}:9000" if r else None
 
 
-async def _forward(worker_url, contact_id, message_id, msg_type, content, metadata) -> bool:
+async def _forward(worker_url, call_id, scenario_id, contact_id,
+                   message_id, msg_type, content, metadata) -> bool:
+    """
+    WorkerEventEnvelope מצפה ל-call_id (ראה EventController.cs).
+    HandleEntryMessage מעביר אותו ל-WebhookMessagePayload.CallId — בלעדיו
+    ה-worker מקבל CallId=null ומנתב את ההודעה בלי הקשר לשיחה.
+    """
     try:
         async with httpx.AsyncClient(timeout=5) as c:
             r = await c.post(f"{worker_url}/webhook/event", json={
-                "typeEvent":  "entryMessage",
-                "contact_id": contact_id,
-                "message_id": message_id,
+                "typeEvent":   "entryMessage",
+                "call_id":     call_id,          # ← היה חסר
+                "scenario_id": scenario_id,
+                "contact_id":  contact_id,
+                "message_id":  message_id,
                 "payload": {
                     "type": msg_type,
                     "data": {"text": content} if msg_type == "text" else (metadata or {}),

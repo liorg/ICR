@@ -46,6 +46,7 @@ def fire_schedule(sched) -> bool:
                 "scenario_id": scenario_id,
                 "priority":    sched.get("priority"),
                 "source":      "scheduler",
+                "schedule_id": sched["id"],   # ← כדי שההפעלה תופיע בטאב Calls
             }, timeout=15)
 
             # 201 = נוצר ורץ. תזמון לא נכנס לתור — רק טריגר.

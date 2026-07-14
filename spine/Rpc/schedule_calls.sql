@@ -174,7 +174,7 @@ language sql stable as $$
                c.created_at, c.started_at, c.ended_at,
                c.duration_seconds, c.mismatch_count, c.last_step_id,
                ct.name  as contact_name,
-               ct.phone as contact_phone,
+               ct.number as contact_phone,
                s.name   as scenario_name,
                (select count(*) from spine_leaves l where l.call_id = c.id)                         as leaves_total,
                (select count(*) from spine_leaves l where l.call_id = c.id and l.status = 'Sent')   as leaves_sent,

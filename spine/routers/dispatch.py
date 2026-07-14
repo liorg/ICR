@@ -27,6 +27,7 @@ class EnsureReq(BaseModel):
     priority:      Optional[int] = None
     source:        str = "api"            # trigger | scheduler | api
     first_message: Optional[dict] = None
+    schedule_id:   Optional[str] = None
 
 
 class DispatchReq(BaseModel):
@@ -56,7 +57,8 @@ class CompleteReq(BaseModel):
 async def ensure(req: EnsureReq, response: Response):
     db  = get_supabase()
     res = await ensure_call(db, req.phone_id, req.contact_id, req.scenario_id,
-                            req.priority, req.source, req.first_message)
+                            req.priority, req.source, req.first_message,
+                            req.schedule_id)
 
     if res.http_status in (404,):
         raise HTTPException(404, res.code)

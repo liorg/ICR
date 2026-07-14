@@ -41,7 +41,8 @@ create or replace function spine_ensure_call(
     p_scenario_id uuid,
     p_snapshot    jsonb,
     p_priority    int     default 100,
-    p_source      text    default 'trigger'
+    p_source      text    default 'trigger',
+    p_schedule_id uuid    default null
 )
 returns jsonb
 language plpgsql
@@ -55,9 +56,9 @@ begin
 
     begin
         insert into calls (id, scenario_id, scenario_snapshot, phone_id, contact_id,
-                           status, priority, source, started_at, created_at)
+                           status, priority, source, schedule_id, started_at, created_at)
         values (v_call_id, p_scenario_id, p_snapshot, p_phone_id, p_contact_id,
-                'running', p_priority, p_source, now(), now());
+                'running', p_priority, p_source, p_schedule_id, now(), now());
 
         return jsonb_build_object(
             'call_id', v_call_id,
@@ -95,9 +96,9 @@ begin
         end if;
 
         insert into calls (id, scenario_id, scenario_snapshot, phone_id, contact_id,
-                           status, priority, source, created_at)
+                           status, priority, source, schedule_id, created_at)
         values (v_call_id, p_scenario_id, p_snapshot, p_phone_id, p_contact_id,
-                'queued', p_priority, p_source, now());
+                'queued', p_priority, p_source, p_schedule_id, now());
 
         return jsonb_build_object(
             'call_id',        v_call_id,

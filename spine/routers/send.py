@@ -1,9 +1,15 @@
 """
 POST /send/{phone_id} — שליחה דרך ה-HostAgent, ושמירה ב-messages.
 
-שינוי מהותי: אין יותר spine_webhooks.agent_url.
-יש HostAgent אחד שמנתב לפי phoneId (PortHashCalculator) — כלומר קבוע
-קונפיגורציה, בדיוק כמו SPINE_URL בכיוון ההפוך. env: HOST_AGENT_URL.
+חוזה ה-HostAgent (אומת מול Swagger):
+    POST /api/phones/{phoneId}/send/{type}
+    SendTextRequest → { "jid": "...", "text": "..." }
+
+הסוגים הנתמכים בפועל:
+    text · buttons · list · button-response · list-response · ping · status
+אין image/file/audio — כל שליחת מדיה תחזיר 404.
+
+אין spine_webhooks. יש HostAgent אחד שמנתב לפי phoneId → env.
 """
 import os, logging
 from typing import Optional, Any
@@ -18,37 +24,41 @@ router = APIRouter(prefix="/send", tags=["send"])
 log = logging.getLogger("spine.send")
 
 HOST_AGENT_URL = os.getenv("HOST_AGENT_URL", "http://10.186.0.2:5000")
+SEND_PATH      = os.getenv("HOST_AGENT_SEND_PATH", "/api/phones/{phone_id}/send/{type}")
 
-# ← הנתיב בקונטרולר השליחה של ה-HostAgent. {phone_id} ו-{type} מוחלפים.
-#   אם החוזה שונה — לשנות env בלבד, בלי נגיעה בקוד.
-SEND_PATH = os.getenv("HOST_AGENT_SEND_PATH", "/api/messages/{phone_id}/send/{type}")
+# מה שה-HostAgent באמת חושף. כל השאר → 404.
+SUPPORTED = {"text", "buttons", "list", "button-response", "list-response", "ping", "status"}
 
 
 class SendReq(BaseModel):
-    contact_id: str
-    contact_phone: str
-    message_type: str = "text"
-    content: Optional[str] = None
-    metadata: Optional[Any] = None
-    leaf_id: Optional[str] = None
-    call_id: Optional[str] = None
+    contact_id:    str
+    contact_phone: str                      # ה-jid: lid אם קיים, אחרת number
+    message_type:  str = "text"
+    content:       Optional[str] = None
+    metadata:      Optional[Any] = None
+    leaf_id:       Optional[str] = None
+    call_id:       Optional[str] = None
 
 
 @router.post("/{phone_id}")
 async def send_message(phone_id: str, req: SendReq):
     db = get_supabase()
 
-    payload = {"phone": req.contact_phone}
-    if req.message_type == "text":
-        payload["message"] = req.content or ""
-    elif req.message_type == "buttons":
-        payload["message"] = req.content or ""
-        payload["buttons"] = (req.metadata or {}).get("buttons", [])
-    elif req.message_type in ("image", "file", "audio"):
-        payload["url"]     = (req.metadata or {}).get("url", "")
-        payload["caption"] = req.content or ""
+    if req.message_type not in SUPPORTED:
+        raise HTTPException(400, f"unsupported message_type '{req.message_type}' "
+                                 f"(HostAgent supports: {', '.join(sorted(SUPPORTED))})")
 
-    url = HOST_AGENT_URL.rstrip("/") + SEND_PATH.format(phone_id=phone_id, type=req.message_type)
+    # ── SendTextRequest: jid + text. לא phone/message. ─────────────────
+    payload = {"jid": req.contact_phone, "text": req.content or ""}
+
+    meta = req.metadata or {}
+    if req.message_type == "buttons":
+        payload["buttons"] = meta.get("buttons", [])
+    elif req.message_type == "list":
+        payload["sections"] = meta.get("sections", [])
+
+    url = HOST_AGENT_URL.rstrip("/") + SEND_PATH.format(
+        phone_id=phone_id, type=req.message_type)
 
     wa_id, status = None, "failed"
     try:
@@ -58,20 +68,20 @@ async def send_message(phone_id: str, req: SendReq):
             wa_id  = result.get("messageId") or (result.get("key") or {}).get("id")
             status = "sent" if resp.status_code == 200 else "failed"
             if status == "failed":
-                log.error("Send rejected | phone=%s status=%s body=%s",
-                          phone_id, resp.status_code, resp.text[:200])
+                log.error("Send rejected | phone=%s url=%s status=%s body=%s",
+                          phone_id, url, resp.status_code, resp.text[:200])
     except Exception as e:
         log.error("Send failed | phone=%s url=%s: %s", phone_id, url, e)
 
-    # ── direction: מיושר לקונבנציה של ה-HostAgent ─────────────────────────
-    # WebhookController: AddMessageAsync(direction: isIncoming)
-    #   → True = נכנסת, False = יוצאת.
-    # הקוד הקודם כתב כאן True על הודעה יוצאת — היפוך מול ה-HostAgent,
-    # שגרם לבועות להתרנדר בצד ההפוך במסך השיחות.
-    msg_res = db.table("messages").insert({
+    # ── direction: מיושר ל-AddMessageAsync(direction: isIncoming) ─────
+    #   True  = נכנסת
+    #   False = יוצאת   ← כאן
+    # הקוד הקודם כתב True על הודעה יוצאת — היפוך מול ה-HostAgent, על
+    # אותה עמודה, ולכן בועות התרנדרו בצד ההפוך.
+    msg = db.table("messages").insert({
         "phone_id":            phone_id,
         "contact_id":          req.contact_id,
-        "direction":           False,          # ← יוצאת
+        "direction":           False,
         "content":             req.content,
         "message_type":        req.message_type,
         "whatsapp_message_id": wa_id,
@@ -80,7 +90,7 @@ async def send_message(phone_id: str, req: SendReq):
         "call_id":             req.call_id,
     }).execute()
 
-    msg_id = msg_res.data[0]["id"] if msg_res.data else None
+    msg_id = msg.data[0]["id"] if msg.data else None
 
     if req.leaf_id and msg_id:
         try:

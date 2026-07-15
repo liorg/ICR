@@ -73,33 +73,21 @@ async def send_message(phone_id: str, req: SendReq):
     except Exception as e:
         log.error("Send failed | phone=%s url=%s: %s", phone_id, url, e)
 
-    # ── direction: מיושר ל-AddMessageAsync(direction: isIncoming) ─────
-    #   True  = נכנסת
-    #   False = יוצאת   ← כאן
-    # הקוד הקודם כתב True על הודעה יוצאת — היפוך מול ה-HostAgent, על
-    # אותה עמודה, ולכן בועות התרנדרו בצד ההפוך.
-    msg = db.table("messages").insert({
-        "phone_id":            phone_id,
-        "contact_id":          req.contact_id,
-        "direction":           False,
-        "content":             req.content,
-        "message_type":        req.message_type,
-        "whatsapp_message_id": wa_id,
-        "status":              status,
-        "metadata":            req.metadata,
-        "call_id":             req.call_id,
-    }).execute()
 
-    msg_id = msg.data[0]["id"] if msg.data else None
-
-    if req.leaf_id and msg_id:
-        try:
-            db.table("spine_leaf_messages").insert(
-                {"leaf_id": req.leaf_id, "message_id": msg_id}).execute()
-        except Exception:
-            pass
+    if req.leaf_id and req.call_id and wa_id:
+        db.table("spine_leaf_messages").upsert(
+            {
+                "scenario_id": req.scenario_id,
+                "call_id": req.call_id,
+                "leaf_id": req.leaf_id,
+                "whatsapp_message_id": wa_id,
+                "message_id": None,
+            },
+            on_conflict="scenario_id,call_id,leaf_id,whatsapp_message_id",
+        ).execute()
 
     if status == "failed":
         raise HTTPException(502, f"HostAgent send failed for phone {phone_id}")
 
-    return {"ok": True, "message_id": msg_id, "wa_message_id": wa_id, "status": status}
+    return { "ok": True,  "message_id": wa_id,  "wa_message_id": wa_id,"status": status}
+    

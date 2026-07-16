@@ -106,64 +106,134 @@ def entry_payload(call_id, scenario_id, contact_id, message_id,
 # ══════════════════════════════════════════════════════════════════════
 # ensure — נקודת היצירה היחידה
 # ══════════════════════════════════════════════════════════════════════
-async def ensure_call(db, phone_id: str, contact_id: str, scenario_id: str,
-                      priority: Optional[int] = None,
-                      source: str = "trigger",
-                      first_message: Optional[dict] = None,
-                      schedule_id: Optional[str] = None) -> CallResult:
+async def ensure_call(
+    db,
+    phone_id: str,
+    contact_id: str,
+    scenario_id: str,
+    priority: Optional[int] = None,
+    source: str = "trigger",
+    first_message: Optional[dict] = None,
+    schedule_id: Optional[str] = None,
+) -> CallResult:
+    """
+    קריאת DB אחת בלבד.
 
-    # contacts.number — לא "phone". lid מועדף כשקיים (ווטסאפ מזהה לפיו).
-    contact = db.table("contacts").select("id, number, lid, name, tag") \
-                .eq("id", contact_id).maybe_single().execute().data
-    if not contact:
-        return CallResult(404, "CONTACT_NOT_FOUND", {"code": "CONTACT_NOT_FOUND"})
+    spine_ensure_call אחראי על:
+      - אימות Contact לפי phone_id + contact_id
+      - בדיקת Contact פעיל
+      - אימות Scenario לפי phone_id + scenario_id
+      - בדיקת Scenario פעיל
+      - שליפת config + priority
+      - שמירת scenario_snapshot
+      - יצירת running / queued / blocked תחת lock אטומי
+    """
 
-    # draft contact לא מריץ תרחישים.
-    if contact.get("tag") != "active":
-        return CallResult(409, "CONTACT_NOT_ACTIVE", {
-            "code": "CONTACT_NOT_ACTIVE",
-            "message": f"tag={contact.get('tag')}",
-        })
+    res = (
+        db.rpc(
+            "spine_ensure_call",
+            {
+                "p_phone_id": phone_id,
+                "p_contact_id": contact_id,
+                "p_scenario_id": scenario_id,
+                "p_priority": priority,
+                "p_source": source,
+                "p_schedule_id": schedule_id,
+            },
+        )
+        .execute()
+        .data
+    )
 
-    # scenario_id חובה. אין בחירה אוטומטית — הקורא מחליט.
-    sc = db.table("scenarios").select("id, config, priority") \
-           .eq("id", scenario_id).maybe_single().execute().data
-    if not sc:
-        return CallResult(404, "NO_SCENARIO", {"code": "NO_SCENARIO"})
+    if not isinstance(res, dict):
+        res = {
+            "status": "error",
+            "code": "INVALID_RPC_RESPONSE",
+            "message": "spine_ensure_call returned a non-object response",
+            "raw": res,
+        }
 
-    snapshot = sc.get("config") or {}
-    prio     = priority if priority is not None else sc.get("priority", 100)
+    code = res.get("code", "UNKNOWN")
+    call_status = res.get("status")
+    call_id = res.get("call_id")
 
-    # ── ה-RPC האטומי: advisory lock + partial unique index. ───────────
-    res = db.rpc("spine_ensure_call", {
-        "p_phone_id":    phone_id,
-        "p_contact_id":  contact_id,
-        "p_scenario_id": sc["id"],
-        "p_snapshot":    snapshot,
-        "p_priority":    prio,
-        "p_source":      source,
-        "p_schedule_id": schedule_id,   # ← הקישור לטאב Calls של התזמון
-    }).execute().data
+    log.info(
+        "[ENSURE] %s | phone=%s contact=%s scenario=%s source=%s call=%s status=%s",
+        code,
+        phone_id,
+        contact_id,
+        scenario_id,
+        source,
+        call_id,
+        call_status,
+    )
 
-    code   = res.get("code")
-    status = res.get("status")
+    if code == "CONTACT_NOT_FOUND":
+        return CallResult(404, code, res)
 
-    log.info("[ENSURE] %s | phone=%s contact=%s source=%s call=%s",
-             code, phone_id, contact_id, source, res.get("call_id"))
+    if code == "CONTACT_NOT_ACTIVE":
+        return CallResult(409, code, res)
 
-    # scheduler/api בזמן שיחה פעילה → נחסם. לא נכנס לתור.
-    if status == "blocked":
-        return CallResult(409, code, res, res.get("call_id"), phone_id)
+    if code == "SCENARIO_NOT_FOUND_OR_INACTIVE":
+        return CallResult(404, code, res)
 
-    # trigger בזמן שיחה פעילה → תור. יורם ב-complete_call, לא נשלח עכשיו.
-    if status == "queued":
-        return CallResult(202, code, res, res.get("call_id"), phone_id)
+    if code == "INVALID_RPC_RESPONSE" or call_status == "error":
+        return CallResult(500, code, res)
 
-    # running → הקורא ישלח init ל-Worker.
+    if call_status == "blocked":
+        return CallResult(
+            409,
+            code,
+            res,
+            call_id,
+            phone_id,
+        )
+
+    if call_status == "queued":
+        return CallResult(
+            202,
+            code,
+            res,
+            call_id,
+            phone_id,
+        )
+
+    if call_status != "running" or not call_id:
+        body = dict(res)
+        body["code"] = "UNEXPECTED_ENSURE_RESULT"
+        body["message"] = (
+            "spine_ensure_call did not return running, queued or blocked"
+        )
+
+        return CallResult(
+            500,
+            "UNEXPECTED_ENSURE_RESULT",
+            body,
+        )
+
+    contact = {
+        "id": res.get("contact_id"),
+        "number": res.get("contact_number") or "",
+        "lid": res.get("contact_lid"),
+        "name": res.get("contact_name") or "",
+        "tag": "active",
+    }
+
+    snapshot = res.get("scenario_json") or {}
+
     return CallResult(
-        201, code, res, res.get("call_id"), phone_id,
-        worker_payload=init_payload(res["call_id"], contact, sc["id"],
-                                    snapshot, first_message),
+        201,
+        code,
+        res,
+        call_id,
+        phone_id,
+        worker_payload=init_payload(
+            call_id,
+            contact,
+            res.get("scenario_id") or scenario_id,
+            snapshot,
+            first_message,
+        ),
     )
 
 

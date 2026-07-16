@@ -214,18 +214,11 @@ journalctl -u whatsapp-manager.service -f | grep DISPATCH
 
 ---
 
-## 10. פתוח
 
-| # | מה | השפעה |
-|---|-----|-------|
-| 🔴 | **`next_run` לא מחושב** ב-`create_schedule` / `update_schedule` | **אף תזמון לא יורה לעולם.** צריך `spine_compute_next_run` בשניהם |
-| 🔴 | **`runNow` לא מריץ כלום** — רק `update status='running'` | הכפתור ▶ משנה badge בלבד |
-| 🔴 | **`HOST_AGENT_SEND_PATH`** — ניחוש. הקובץ לא נראה מעולם | **כל שליחה 404** |
-| 🟡 | **Timezone** — `timestamp without time zone` מול `now()` | תזמון בהיסט של 3 שעות |
-| 🟡 | **`WEBHOOK_TYPE`** — `"trigger"` או `"Trigger"`? | אפס הודעות, אפס שגיאות |
-| 🟢 | `lid` מול `number` — מה ה-HostAgent מצפה? | נסגר עם קונטרולר השליחה |
-| 🟢 | `spine_leaves.status` — `'Sent'` או `'sent'`? | ה-counts יחזרו 0 |
-| 🟢 | `call_type` מול `source` — כפילות? | |
-| 🟢 | `cron_expr.days` — שמות עבריים או מספרים? | תזמון שבועי יחזיר `NULL` |
 
-**שום דבר מזה לא נבדק בריצה.** ה-Spine עקבי עם כל מה שנראה — אבל לא הורץ.
+
+
+
+
+## compile
+python3 -m compileall spine

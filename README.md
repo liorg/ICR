@@ -218,7 +218,41 @@ journalctl -u whatsapp-manager.service -f | grep DISPATCH
 
 
 
+##LOGS
 
+```bash
+docker service logs scenario_scheduler --since 10m --tail 200
 
 ## compile
+
 python3 -m compileall spine
+
+כדאי עכשיו לבדוק שה־Task החדש באמת רץ:
+```bash
+docker service ps scenario_scheduler --no-trunc
+
+```bash
+docker service inspect scenario_scheduler \
+  --format '{{json .UpdateStatus}}'
+בדיקת LATEST IMAGES
+```bash
+docker service inspect scenario_scheduler \
+  --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}'
+
+
+Compile on docker
+
+```bash
+docker run --rm \
+  --env-file .env \
+  -e SPINE_URL=http://scenario_data-spine:8000 \
+  --entrypoint python \
+  10.186.0.3:5000/scheduler:latest \
+  -c "import main; print('OK')"
+
+
+
+
+
+
+

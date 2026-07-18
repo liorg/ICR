@@ -87,22 +87,53 @@ def init_payload(call_id, contact, scenario_id, snapshot, first_message=None) ->
     }
 
 
-def entry_payload(call_id, scenario_id, contact_id, message_id,
-                  msg_type, content, metadata=None) -> dict:
-    """typeEvent=entryMessage. call_id חובה — HandleEntryMessage לא מוודא אותו."""
+
+
+def entry_payload(
+    call_id: str,
+    scenario_id: Optional[str],
+    contact_id: str,
+    message_id: str,
+    whatsapp_message_id: Optional[str],
+    msg_type: str,
+    content: Optional[str],
+    metadata: Optional[dict] = None,
+) -> dict:
+    """
+    typeEvent=entryMessage.
+
+    message_id:
+        מזהה פנימי של הרשומה בטבלת messages.
+
+    whatsapp_message_id:
+        מזהה ההודעה המקורי של WhatsApp.
+
+    שני המזהים עוברים ל-Worker בנפרד לאורך כל ה-flow.
+    """
+
+    data = (
+        {"text": content or ""}
+        if msg_type == "text"
+        else (metadata or {})
+    )
+
     return {
-        "typeEvent":   "entryMessage",
-        "call_id":     call_id,
+        "typeEvent": "entryMessage",
+        "call_id": call_id,
         "scenario_id": scenario_id,
-        "contact_id":  contact_id,
-        "message_id":  message_id,
+        "contact_id": contact_id,
+
+        # מזהה פנימי בטבלת messages
+        "message_id": message_id,
+
+        # מזהה ההודעה ב-WhatsApp
+        "whatsapp_message_id": whatsapp_message_id,
+
         "payload": {
             "type": msg_type,
-            "data": {"text": content} if msg_type == "text" else (metadata or {}),
+            "data": data,
         },
     }
-
-
 # ══════════════════════════════════════════════════════════════════════
 # ensure — נקודת היצירה היחידה
 # ══════════════════════════════════════════════════════════════════════

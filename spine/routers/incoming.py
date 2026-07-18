@@ -3,14 +3,18 @@ POST /incoming
 
 Webhook מסוג Trigger מה-HostAgent.
 
-ה-HostAgent כבר:
-1. קיבל הודעת WhatsApp.
-2. שמר אותה בטבלת messages.
-3. שולח ל-Spine את שני המזהים:
-   - messageId          — מזהה פנימי בטבלת messages.
-   - whatsAppMessageId  — מזהה ההודעה ב-WhatsApp.
+ה-HostAgent כבר שמר את ההודעה בטבלת messages ולכן Spine לא יוצר אותה שוב.
 
-Spine לא יוצר שוב רשומת messages.
+ה-HostAgent מעביר שני מזהים:
+
+    messageId
+        מזהה פנימי של הרשומה בטבלת messages.
+
+    whatsAppMessageId
+        מזהה ההודעה המקורי של WhatsApp.
+
+בהודעה יוצאת Spine מחפש ב-spine_leaf_messages לפי
+whatsapp_message_id ומשלים את message_id הפנימי.
 """
 
 import json
@@ -30,10 +34,10 @@ log = logging.getLogger("spine.incoming")
 class IncomingDispatch(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    # מזהה הרשומה הפנימי בטבלת messages.
+    # מזהה פנימי בטבלת messages.
     message_id: str = Field(alias="messageId")
 
-    # מזהה ההודעה המקורי של WhatsApp.
+    # C# WhatsAppMessageId עם camelCase נהפך ל-whatsAppMessageId.
     whatsapp_message_id: str = Field(alias="whatsAppMessageId")
 
     phone_id: str = Field(alias="phoneId")
@@ -49,8 +53,7 @@ async def handle_incoming(body: IncomingDispatch):
     db = get_supabase()
 
     log.info(
-        "Incoming dispatch | phone=%s contact=%s message=%s "
-        "whatsapp=%s direction=%s",
+        "[INCOMING] phone=%s contact=%s message=%s whatsapp=%s direction=%s",
         body.phone_id,
         body.contact_id,
         body.message_id,
@@ -58,7 +61,6 @@ async def handle_incoming(body: IncomingDispatch):
         "incoming" if body.direction else "outgoing",
     )
 
-    # מאמתים שהרשומה שנוצרה על ידי HostAgent תואמת לכל המזהים.
     message = _load_message(
         db,
         message_id=body.message_id,
@@ -68,14 +70,6 @@ async def handle_incoming(body: IncomingDispatch):
     )
 
     if not message:
-        log.warning(
-            "Message not found | phone=%s contact=%s message=%s whatsapp=%s",
-            body.phone_id,
-            body.contact_id,
-            body.message_id,
-            body.whatsapp_message_id,
-        )
-
         raise HTTPException(
             status_code=404,
             detail=(
@@ -84,19 +78,20 @@ async def handle_incoming(body: IncomingDispatch):
             ),
         )
 
-    # HostAgent שמר את ההודעה. כעת משלימים את הקישור:
+    # משלים בטבלת הקישור את message_id הפנימי לפי whatsapp_message_id.
     #
-    # spine_leaf_messages.whatsapp_message_id
-    #                  ↓
-    # messages.id
+    # בזמן השליחה כבר קיימת שורה:
+    # leaf_id + whatsapp_message_id + message_id=NULL
+    #
+    # כעת לאחר שה-HostAgent שמר messages:
+    # leaf_id + whatsapp_message_id + message_id
     linked_count = _complete_leaf_message_links(
         db,
         whatsapp_message_id=body.whatsapp_message_id,
         internal_message_id=body.message_id,
     )
 
-    # הודעה יוצאת:
-    # לא שולחים אותה ל-scenario כ-reply ולא מפעילים trigger.
+    # הודעה יוצאת אינה reply לתרחיש.
     # רק משלימים את הקישור בין leaf לבין messages.
     if not body.direction:
         return {
@@ -111,6 +106,8 @@ async def handle_incoming(body: IncomingDispatch):
 
     msg_type, content, metadata = _normalize_message(message)
 
+    # משמש עבור call חדש שנוצר בעקבות trigger.
+    # גם כאן שני המזהים עוברים ל-Worker.
     first_message = {
         "message_id": body.message_id,
         "whatsapp_message_id": body.whatsapp_message_id,
@@ -131,21 +128,19 @@ async def handle_incoming(body: IncomingDispatch):
     delivered_to_active = False
 
     if active_call:
-        worker_payload = entry_payload(
-            call_id=active_call["id"],
-            scenario_id=active_call.get("scenario_id"),
-            contact_id=body.contact_id,
-            message_id=body.message_id,
-            whatsapp_message_id=body.whatsapp_message_id,
-            message_type=msg_type,
-            content=content,
-            metadata=metadata,
-        )
-
         delivered_to_active = await send_to_worker(
             db,
             body.phone_id,
-            worker_payload,
+            entry_payload(
+                call_id=active_call["id"],
+                scenario_id=active_call.get("scenario_id"),
+                contact_id=body.contact_id,
+                message_id=body.message_id,
+                whatsapp_message_id=body.whatsapp_message_id,
+                msg_type=msg_type,
+                content=content,
+                metadata=metadata,
+            ),
         )
 
     scenarios = _load_trigger_scenarios(
@@ -210,8 +205,13 @@ def _load_message(
     contact_id: str,
 ) -> Optional[dict]:
     """
-    טוען את ההודעה שנוצרה על ידי HostAgent ומוודא שכל ארבעת
-    המזהים מתאימים לאותה רשומה.
+    טוען את ההודעה שנוצרה ב-HostAgent.
+
+    מאמת שכל המזהים מתאימים לאותה רשומה:
+    - messages.id
+    - messages.whatsapp_message_id
+    - phone_id
+    - contact_id
     """
 
     result = (
@@ -277,11 +277,26 @@ def _complete_leaf_message_links(
     internal_message_id: str,
 ) -> int:
     """
-    בזמן השליחה Spine כבר שמר:
-        spine_leaf_messages.whatsapp_message_id
+    משלים את טבלת הקישור רבים-לרבים.
 
-    לאחר שה-webhook של HostAgent יצר messages, אנחנו משלימים:
-        spine_leaf_messages.message_id
+    לפני webhook:
+
+        scenario_id
+        call_id
+        leaf_id
+        whatsapp_message_id
+        message_id = NULL
+
+    לאחר webhook:
+
+        scenario_id
+        call_id
+        leaf_id
+        whatsapp_message_id
+        message_id = messages.id
+
+    העדכון לפי whatsapp_message_id יכול להשלים כמה שורות,
+    ולכן נשמרת תמיכה ברבים-לרבים.
     """
 
     if not whatsapp_message_id or not internal_message_id:
@@ -295,20 +310,20 @@ def _complete_leaf_message_links(
             }
         )
         .eq("whatsapp_message_id", whatsapp_message_id)
+        .is_("message_id", "null")
         .execute()
     )
 
-    completed = len(result.data or [])
+    linked_count = len(result.data or [])
 
-    if completed:
-        log.info(
-            "Leaf links completed | message=%s whatsapp=%s count=%s",
-            internal_message_id,
-            whatsapp_message_id,
-            completed,
-        )
+    log.info(
+        "[LEAF-LINK] whatsapp=%s message=%s completed=%s",
+        whatsapp_message_id,
+        internal_message_id,
+        linked_count,
+    )
 
-    return completed
+    return linked_count
 
 
 def _normalize_message(

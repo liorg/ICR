@@ -63,6 +63,7 @@ class LeafIn(BaseModel):
     step_id: str = ""
     type: str = ""
     message_id: Optional[str] = None
+    whatsapp_message_id: Optional[str] = None
     content: Optional[str] = None
     wa_type: Optional[str] = None
     status: str = "Pending"
@@ -78,6 +79,7 @@ class LeafStatusIn(BaseModel):
 
     status: str
     message_id: Optional[str] = None
+    whatsapp_message_id: Optional[str] = None
 
 
 class HeartbeatIn(BaseModel):
@@ -147,6 +149,7 @@ def ingest_leaf(leaf: LeafIn):
                 "step_id": leaf.step_id,
                 "type": leaf.type,
                 "message_id": leaf.message_id,
+                "whatsapp_message_id": leaf.whatsapp_message_id,
                 "content": leaf.content,
                 "wa_type": leaf.wa_type,
                 "status": leaf.status,
@@ -157,6 +160,37 @@ def ingest_leaf(leaf: LeafIn):
         )
         .execute()
     )
+
+    # הודעה נכנסת מגיעה מה-Worker עם שני המזהים שכבר ידועים.
+    # לכן אפשר ליצור מיד את הקישור רבים-לרבים בלי חיפוש נוסף ב-messages.
+    if leaf.message_id:
+        try:
+            (
+                db.table("spine_leaf_messages")
+                .upsert(
+                    {
+                        "scenario_id": leaf.scenario_id,
+                        "call_id": leaf.call_id,
+                        "leaf_id": leaf.leaf_id,
+                        "message_id": leaf.message_id,
+                        "whatsapp_message_id": leaf.whatsapp_message_id,
+                    },
+                    on_conflict=(
+                        "scenario_id,call_id,leaf_id,message_id"
+                    ),
+                )
+                .execute()
+            )
+        except Exception:
+            log.exception(
+                "Failed linking incoming leaf to message | "
+                "scenario=%s call=%s leaf=%s message=%s whatsapp=%s",
+                leaf.scenario_id,
+                leaf.call_id,
+                leaf.leaf_id,
+                leaf.message_id,
+                leaf.whatsapp_message_id,
+            )
 
     if not result.data:
         log.warning(
@@ -188,10 +222,13 @@ def update_leaf(body: LeafStatusIn):
         "status": body.status,
     }
 
-    # message_id מתעדכן רק אם נשלח ערך.
-    # שליחת null אינה מוחקת message_id קיים.
+    # מזהים מתעדכנים רק אם נשלח ערך.
+    # שליחת null אינה מוחקת ערך קיים.
     if body.message_id is not None:
         patch["message_id"] = body.message_id
+
+    if body.whatsapp_message_id is not None:
+        patch["whatsapp_message_id"] = body.whatsapp_message_id
 
     result = (
         db.table("spine_leaves")
@@ -215,53 +252,40 @@ def update_leaf(body: LeafStatusIn):
             detail="Leaf not found for the supplied scenario, call and leaf IDs",
         )
 
-    # קישור Leaf ↔ Message
+    # בהודעה נכנסת Worker מעביר message_id פנימי.
+    # לכן מקשרים ישירות לטבלת רבים-לרבים.
+    #
+    # בהודעה יוצאת בדרך כלל קיים רק whatsapp_message_id בשלב זה;
+    # הקישור ל-message_id הפנימי מושלם מאוחר יותר ב-incoming.py
+    # לאחר webhook של HostAgent.
     if body.message_id:
-        message_result = (
-            db.table("messages")
-            .select("id")
-            .eq("whatsapp_message_id", body.message_id)
-            .limit(1)
-            .execute()
-        )
-
-        if not message_result.data:
-            log.warning(
-                "Message not found for leaf link | "
-                "scenario=%s call=%s leaf=%s whatsapp_message_id=%s",
+        try:
+            (
+                db.table("spine_leaf_messages")
+                .upsert(
+                    {
+                        "scenario_id": body.scenario_id,
+                        "call_id": body.call_id,
+                        "leaf_id": body.leaf_id,
+                        "message_id": body.message_id,
+                        "whatsapp_message_id": body.whatsapp_message_id,
+                    },
+                    on_conflict=(
+                        "scenario_id,call_id,leaf_id,message_id"
+                    ),
+                )
+                .execute()
+            )
+        except Exception:
+            log.exception(
+                "Failed linking leaf to message | "
+                "scenario=%s call=%s leaf=%s message=%s whatsapp=%s",
                 body.scenario_id,
                 body.call_id,
                 body.leaf_id,
                 body.message_id,
+                body.whatsapp_message_id,
             )
-        else:
-            internal_message_id = message_result.data[0]["id"]
-
-            try:
-                (
-                    db.table("spine_leaf_messages")
-                    .upsert(
-                        {
-                            "scenario_id": body.scenario_id,
-                            "call_id": body.call_id,
-                            "leaf_id": body.leaf_id,
-                            "message_id": internal_message_id,
-                        },
-                        on_conflict=(
-                            "scenario_id,call_id,leaf_id,message_id"
-                        ),
-                    )
-                    .execute()
-                )
-            except Exception:
-                log.exception(
-                    "Failed linking leaf to message | "
-                    "scenario=%s call=%s leaf=%s message=%s",
-                    body.scenario_id,
-                    body.call_id,
-                    body.leaf_id,
-                    internal_message_id,
-                )
 
     return {
         "ok": True,

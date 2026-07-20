@@ -31,11 +31,12 @@ class EnsureReq(BaseModel):
 
 
 class ForwardReq(BaseModel):
-    phone_id:   str
-    contact_id: str
-    call_id:    Optional[str] = None
-    message_id: Optional[str] = None
-    payload:    Optional[dict] = None
+    phone_id:            str
+    contact_id:          str
+    call_id:             Optional[str] = None
+    message_id:          Optional[str] = None
+    whatsapp_message_id: Optional[str] = None
+    payload:             Optional[dict] = None
 
 
 class CompleteReq(BaseModel):
@@ -80,8 +81,26 @@ async def complete(call_id: str, req: CompleteReq, response: Response):
 async def forward_message(req: ForwardReq):
     db = get_supabase()
     p  = req.payload or {"type": "text", "data": {"text": ""}}
+
+    # ה-Worker (entryMessage) דורש whatsapp_message_id — 400 בלעדיו.
+    # אם הקורא לא שלח, משלימים מטבלת messages לפי message_id.
+    wa_id = req.whatsapp_message_id
+    if not wa_id and req.message_id:
+        row = db.table("messages").select("whatsapp_message_id") \
+            .eq("id", req.message_id).maybe_single().execute().data
+        wa_id = (row or {}).get("whatsapp_message_id")
+
+    if not wa_id:
+        raise HTTPException(422, "whatsapp_message_id required (not provided and not found in messages)")
+
     ok = await send_to_worker(db, req.phone_id, entry_payload(
-        req.call_id, None, req.contact_id, req.message_id or "",
-        p.get("type", "text"), (p.get("data") or {}).get("text"), p.get("data"),
+        call_id=req.call_id,
+        scenario_id=None,
+        contact_id=req.contact_id,
+        message_id=req.message_id or "",
+        whatsapp_message_id=wa_id,
+        msg_type=p.get("type", "text"),
+        content=(p.get("data") or {}).get("text"),
+        metadata=p.get("data"),
     ))
     return {"ok": ok, "delivered": ok}

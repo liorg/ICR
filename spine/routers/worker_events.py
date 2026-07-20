@@ -175,9 +175,7 @@ def ingest_leaf(leaf: LeafIn):
                         "message_id": leaf.message_id,
                         "whatsapp_message_id": leaf.whatsapp_message_id,
                     },
-                    on_conflict=(
-                        "scenario_id,call_id,leaf_id,message_id"
-                    ),
+                    on_conflict="leaf_id,message_id",
                 )
                 .execute()
             )
@@ -270,9 +268,7 @@ def update_leaf(body: LeafStatusIn):
                         "message_id": body.message_id,
                         "whatsapp_message_id": body.whatsapp_message_id,
                     },
-                    on_conflict=(
-                        "scenario_id,call_id,leaf_id,message_id"
-                    ),
+                    on_conflict="leaf_id,message_id",
                 )
                 .execute()
             )

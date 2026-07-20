@@ -25,10 +25,10 @@ Leaves נשלחים בזמן אמת דרך POST /leaves ומתעדכנים דר�
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from dependencies import get_supabase
 from services.calls import complete_call, send_to_worker
@@ -36,6 +36,15 @@ from services.calls import complete_call, send_to_worker
 
 router = APIRouter(tags=["worker-events"])
 log = logging.getLogger("spine.worker")
+
+
+FINAL_CALL_STATUSES = {
+    "completed",
+    "failed",
+    "aborted",
+    "expired",
+    "timeout",
+}
 
 
 def _now() -> str:
@@ -68,7 +77,7 @@ class LeafIn(BaseModel):
     wa_type: Optional[str] = None
     status: str = "Pending"
     timestamp: Optional[str] = None
-    meta: Optional[dict] = None
+    meta: Optional[dict[str, Any]] = None
 
 
 class LeafStatusIn(BaseModel):
@@ -95,15 +104,29 @@ class SummaryIn(BaseModel):
     scenario_id: str
     phone_id: str = ""
     contact_id: str = ""
-    status: str = ""
-    started_at: Optional[str] = None
-    finished_at: Optional[str] = None
-    duration_seconds: int = 0
+
+    status: Literal[
+        "completed",
+        "failed",
+        "aborted",
+        "expired",
+        "timeout",
+    ] = "completed"
+
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    duration_seconds: int = Field(default=0, ge=0)
     last_step_id: str = ""
-    variables: Optional[dict] = None
-    sender_count: int = 0
-    expected_count: int = 0
-    mismatch_count: int = 0
+
+    variables: dict[str, Any] = Field(default_factory=dict)
+
+    worker_host: str = ""
+    worker_port: int = Field(default=0, ge=0, le=65535)
+
+    sender_count: int = Field(default=0, ge=0)
+    expected_count: int = Field(default=0, ge=0)
+    mismatch_count: int = Field(default=0, ge=0)
 
 
 # ── Events ────────────────────────────────────────────────────────────
@@ -161,8 +184,8 @@ def ingest_leaf(leaf: LeafIn):
         .execute()
     )
 
-    # הודעה נכנסת מגיעה מה-Worker עם שני המזהים שכבר ידועים.
-    # לכן אפשר ליצור מיד את הקישור רבים-לרבים בלי חיפוש נוסף ב-messages.
+    # הודעה נכנסת מגיעה מה-Worker עם message_id פנימי שכבר ידוע.
+    # לכן אפשר ליצור מיד את הקישור רבים-לרבים.
     if leaf.message_id:
         try:
             (
@@ -216,7 +239,7 @@ def update_leaf(body: LeafStatusIn):
 
     db = get_supabase()
 
-    patch = {
+    patch: dict[str, Any] = {
         "status": body.status,
     }
 
@@ -253,9 +276,8 @@ def update_leaf(body: LeafStatusIn):
     # בהודעה נכנסת Worker מעביר message_id פנימי.
     # לכן מקשרים ישירות לטבלת רבים-לרבים.
     #
-    # בהודעה יוצאת בדרך כלל קיים רק whatsapp_message_id בשלב זה;
-    # הקישור ל-message_id הפנימי מושלם מאוחר יותר ב-incoming.py
-    # לאחר webhook של HostAgent.
+    # בהודעה יוצאת בדרך כלל קיים רק whatsapp_message_id בשלב זה.
+    # הקישור ל-message_id הפנימי מושלם מאוחר יותר ב-incoming.py.
     if body.message_id:
         try:
             (
@@ -307,9 +329,11 @@ def heartbeat(hb: HeartbeatIn):
         db.table("phone_workers")
         .update({
             "status": "running" if hb.status == "online" else hb.status,
+            "port": hb.port,
             "updated_at": hb.updated_at or _now(),
         })
         .eq("service_name", hb.service_name)
+        .eq("phone_id", hb.phone_id)
         .execute()
     )
 
@@ -334,69 +358,108 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
     """
     ה-Summary הוא אות הסיום של התרחיש.
 
-    הוא אחראי רק על:
+    הוא אחראי על:
 
-    1. שמירת נתוני הסיכום על ה-call.
-    2. סגירת ה-call.
-    3. קידום ה-call הבא בתור.
-    4. שליחת ה-call הבא ל-Worker.
+    1. אימות שזהו ה-call הנכון.
+    2. שמירת נתוני הסיכום על ה-call.
+    3. סגירת ה-call.
+    4. קידום ה-call הבא בתור.
+    5. שליחת ה-call הבא ל-Worker.
 
     הוא אינו שומר או מעדכן Leaves.
     """
 
+    # אותו call_id חייב להופיע ב-URL וב-body.
     if call_id != summary.call_id:
         raise HTTPException(
             status_code=400,
             detail="call_id in URL does not match call_id in request body",
         )
 
+    # הגנה נוספת מעבר ל-Literal של Pydantic.
+    if summary.status not in FINAL_CALL_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported completion status: {summary.status}",
+        )
+
+    # לא ייתכן שסיום השיחה קדם להתחלתה.
+    if (
+        summary.started_at is not None
+        and summary.finished_at is not None
+        and summary.finished_at < summary.started_at
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="finished_at cannot be earlier than started_at",
+        )
+
     db = get_supabase()
 
-    call_result = (
+    call_patch: dict[str, Any] = {
+        "duration_seconds": summary.duration_seconds,
+        "last_step_id": summary.last_step_id,
+        "variables": summary.variables,
+        "worker_host": summary.worker_host,
+        "worker_port": summary.worker_port,
+        "sender_count": summary.sender_count,
+        "expected_count": summary.expected_count,
+        "mismatch_count": summary.mismatch_count,
+    }
+
+    # לא שולחים None כדי לא למחוק תאריך קיים.
+    if summary.started_at is not None:
+        call_patch["started_at"] = summary.started_at.isoformat()
+
+    if summary.finished_at is not None:
+        call_patch["finished_at"] = summary.finished_at.isoformat()
+
+    # מעדכנים רק כאשר כל הזהות שנשלחה תואמת ל-call.
+    query = (
         db.table("calls")
-        .update({
-            "duration_seconds": summary.duration_seconds,
-            "last_step_id": summary.last_step_id,
-            "variables": summary.variables,
-            "sender_count": summary.sender_count,
-            "expected_count": summary.expected_count,
-            "mismatch_count": summary.mismatch_count,
-        })
+        .update(call_patch)
         .eq("id", call_id)
         .eq("scenario_id", summary.scenario_id)
-        .execute()
     )
+
+    if summary.phone_id:
+        query = query.eq("phone_id", summary.phone_id)
+
+    if summary.contact_id:
+        query = query.eq("contact_id", summary.contact_id)
+
+    call_result = query.execute()
 
     if not call_result.data:
         log.warning(
-            "Call not found for summary | scenario=%s call=%s",
+            "Call not found or summary identity mismatch | "
+            "scenario=%s call=%s phone=%s contact=%s",
             summary.scenario_id,
             call_id,
+            summary.phone_id,
+            summary.contact_id,
         )
 
         raise HTTPException(
             status_code=404,
-            detail="Call not found for the supplied call_id and scenario_id",
+            detail="Call not found or summary identity does not match",
         )
 
     # ── סגירת ה-call + קידום הבא בתור ────────────────────────────────
     #
-    # ה-Summary הוא אות הסיום של התרחיש.
-    #
-    # בלעדיו ה-call יישאר running, ה-partial unique index יחסום
-    # calls עתידיים לאותו contact והתור לא יתקדם.
+    # בלעדי הסגירה ה-call יישאר running,
+    # ה-partial unique index יחסום calls עתידיים לאותו contact,
+    # והתור לא יתקדם.
     #
     # ה-Worker אינו יודע שקיים תור.
-
-    completion_status = summary.status or "completed"
 
     result = await complete_call(
         db,
         call_id,
-        completion_status,
+        summary.status,
     )
 
-    # הפעלת ה-Worker נעשית לפי התוצאה של complete_call.
+    # אם complete_call קידם call מהתור, שולחים אותו ל-Worker.
     if result.needs_worker:
         delivery = await send_to_worker(
             db,
@@ -407,22 +470,30 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
         result.with_delivery(delivery)
 
         log.info(
-            "[SUMMARY] next call dispatched | call=%s delivered=%s",
+            "[SUMMARY] next call dispatched | "
+            "call=%s delivered=%s",
             result.body.get("next_call_id"),
             result.body.get("delivered"),
         )
 
     log.info(
-        "[SUMMARY] scenario=%s call=%s status=%s duration=%ds result=%s",
+        "[SUMMARY] scenario=%s call=%s status=%s "
+        "duration=%ds sender=%d expected=%d mismatches=%d result=%s",
         summary.scenario_id,
         call_id,
-        completion_status,
+        summary.status,
         summary.duration_seconds,
+        summary.sender_count,
+        summary.expected_count,
+        summary.mismatch_count,
         result.code,
     )
 
     return {
         "ok": True,
         "code": result.code,
+        "call_id": call_id,
+        "status": summary.status,
         "next_call_id": result.body.get("next_call_id"),
+        "delivered": result.body.get("delivered"),
     }

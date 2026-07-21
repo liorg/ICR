@@ -6,12 +6,15 @@ select column_name from information_schema.columns
 where table_name = 'spine_leaf_messages';
 
 ```bash
+
+```bash
 select p.oid::regprocedure as signature
 from pg_proc p
 join pg_namespace n on n.oid = p.pronamespace
 where n.nspname = 'public'
   and p.proname in ('spine_complete_call', 'spine_ensure_call');
 
+```bash
 
 
 ##post
@@ -23,6 +26,7 @@ curl -i -X POST "https://umxgluptdopldndqjbvx.supabase.co/rest/v1/rpc/spine_ensu
   -H "Content-Type: application/json" \
   -d '{"p_phone_id":"1ff94cfa-a381-4606-8bbc-f0d36abe8005","p_contact_id":"6217f567-2931-4157-a7ae-1521f53a5f9e","p_scenario_id":"df3b78c2-ac5f-4c8a-be39-cd7ff32da3ea","p_source":"api"}'
 
+```bash
 
 
 

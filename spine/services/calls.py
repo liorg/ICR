@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
+from postgrest.exceptions import APIError
 
-log = logging.getLogger("spine.services.calls")
 
 WORKER_PORT = 9000
 
@@ -42,6 +42,19 @@ class CallResult:
         self.body["delivered"] = delivered
         return self
 
+def _rpc(db, fn: str, params: dict) -> dict:
+    """
+    postgrest 0.17.2 מפיל ValidationError על RPC שמחזיר jsonb חופשי
+    ועוטף אותו כ-APIError — למרות שה-HTTP היה 200 וה-RPC הצליח.
+    """
+    try:
+        return db.rpc(fn, params).execute().data or {}
+    except APIError as e:
+        body = e.args[0] if e.args else None
+        if isinstance(body, dict) and "code" in body:
+            return body      # תשובת RPC תקינה שנעטפה בטעות
+        raise
+log = logging.getLogger("spine.services.calls")
 
 # ══════════════════════════════════════════════════════════════════════
 # Worker plane

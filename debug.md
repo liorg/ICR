@@ -5,6 +5,8 @@
 select column_name from information_schema.columns
 where table_name = 'spine_leaf_messages';
 
+
+# e
 ```bash
 
 ```bash
@@ -14,10 +16,15 @@ join pg_namespace n on n.oid = p.pronamespace
 where n.nspname = 'public'
   and p.proname in ('spine_complete_call', 'spine_ensure_call');
 
-```bash
-
 
 ##post
+
+#ensure
+```bash
+curl -i -X POST http://10.186.0.3:8001/api/calls/ensure \
+  -H "Content-Type: application/json" \
+  -d '{"phone_id":"1ff94cfa-a381-4606-8bbc-f0d36abe8005","contact_id":"6217f567-2931-4157-a7ae-1521f53a5f9e","scenario_id":"df3b78c2-ac5f-4c8a-be39-cd7ff32da3ea","source":"api"}'
+
 
 ```bash
 curl -i -X POST "https://umxgluptdopldndqjbvx.supabase.co/rest/v1/rpc/spine_ensure_call" \
@@ -25,10 +32,9 @@ curl -i -X POST "https://umxgluptdopldndqjbvx.supabase.co/rest/v1/rpc/spine_ensu
   -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
   -H "Content-Type: application/json" \
   -d '{"p_phone_id":"1ff94cfa-a381-4606-8bbc-f0d36abe8005","p_contact_id":"6217f567-2931-4157-a7ae-1521f53a5f9e","p_scenario_id":"df3b78c2-ac5f-4c8a-be39-cd7ff32da3ea","p_source":"api"}'
+#
 
-```bash
-
-
+#result
 
 HTTP/2 200 
 date: Tue, 21 Jul 2026 12:16:02 GMT

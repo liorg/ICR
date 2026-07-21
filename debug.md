@@ -21,9 +21,22 @@ grep -A12 "provisioner:" /opt/ICR/docker-compose.yml
 
 ```bash
 
+docker service logs worker-972504477197-1ff94cfa --since 3m 2>&1 | tail -40
+
+docker service logs scenario_data-spine --since 2m 2>&1 | grep -E "ENSURE|WORKER"
+
 docker exec $(docker ps -q -f name=scenario_data-spine) pip list 2>/dev/null | grep -Ei "postgrest|supabase"
 
+docker service logs -f $(docker service ls --format '{{.Name}}' | grep worker)
 
+docker service logs scenario_provisioner --since 2m 2>&1 | tail -20
+
+docker service logs worker-972504477197-1ff94cfa --since 3m 2>&1 | tail -40
+
+
+docker service logs scenario_data-spine --since 5m 2>&1 | grep -A5 "APIError\|PGRST" | tail -40
+
+```
 
 ```bash
 
@@ -40,14 +53,19 @@ where n.nspname = 'public'
 ## ensure
 
 ```bash
-curl -i -X POST http://10.186.0.3:8001/api/calls/59e04ac0-56fb-4772-8818-2ed27d7b6d0e/complete \
+
+curl -s -X POST http://10.186.0.3:8001/api/calls/88abb689-2f39-40c1-b4df-236e9a98113c/complete \
+  -H "Content-Type: application/json" -d '{"status":"failed"}'
+
+
+
+curl -s -X POST http://10.186.0.3:8001/api/calls/67147be2-4f01-4e70-8e47-e9af2ae9b575/complete \
   -H "Content-Type: application/json" -d '{"status":"completed"}'
 
-curl -i -X POST http://10.186.0.3:8001/api/calls/ensure \
+curl -s -X POST http://10.186.0.3:8001/api/calls/ensure \
   -H "Content-Type: application/json" \
-  -d '{"phone_id":"1ff94cfa-a381-4606-8bbc-f0d36abe8005","contact_id":"6217f567-2931-4157-a7ae-1521f53a5f9e","scenario_id":"df3b78c2-ac5f-4c8a-be39-cd7ff32da3ea","source":"api"}'
-
-```
+  -d '{"phone_id":"1ff94cfa-a381-4606-8bbc-f0d36abe8005","contact_id":"6217f567-2931-4157-a7ae-1521f53a5f9e","scenario_id":"df3b78c2-ac5f-4c8a-be39-cd7ff32da3ea","source":"api"}' \
+  | python3 -m json.tool | head -6
 
 ```bash
 curl -i -X POST "https://umxgluptdopldndqjbvx.supabase.co/rest/v1/rpc/spine_ensure_call" \
@@ -57,6 +75,11 @@ curl -i -X POST "https://umxgluptdopldndqjbvx.supabase.co/rest/v1/rpc/spine_ensu
   -d '{"p_phone_id":"1ff94cfa-a381-4606-8bbc-f0d36abe8005","p_contact_id":"6217f567-2931-4157-a7ae-1521f53a5f9e","p_scenario_id":"df3b78c2-ac5f-4c8a-be39-cd7ff32da3ea","p_source":"api"}'
 
 
+curl -s http://10.186.0.2:5000/swagger/v1/swagger.json | python3 -c "
+import sys,json
+for p in json.load(sys.stdin)['paths']:
+    if 'send' in p: print(p)
+"
 ```
 # result
 

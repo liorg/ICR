@@ -77,15 +77,12 @@ where n.nspname = 'public'
 curl -s -X POST http://10.186.0.3:8001/api/calls/88abb689-2f39-40c1-b4df-236e9a98113c/complete \
   -H "Content-Type: application/json" -d '{"status":"failed"}'
 
-
-
-curl -s -X POST http://10.186.0.3:8001/api/calls/67147be2-4f01-4e70-8e47-e9af2ae9b575/complete \
-  -H "Content-Type: application/json" -d '{"status":"completed"}'
-
 curl -s -X POST http://10.186.0.3:8001/api/calls/ensure \
   -H "Content-Type: application/json" \
-  -d '{"phone_id":"1ff94cfa-a381-4606-8bbc-f0d36abe8005","contact_id":"6217f567-2931-4157-a7ae-1521f53a5f9e","scenario_id":"df3b78c2-ac5f-4c8a-be39-cd7ff32da3ea","source":"api"}' \
-  | python3 -m json.tool | head -6
+  -d '{"phone_id":"3beff8fa-4dc6-4a03-b70f-17a47fe09529","contact_id":"c227fb24-5e50-4e48-b863-80c2e1112af7","scenario_id":"cc43576c-42a3-425c-a833-589d91597b78","source":"api"}' \
+  | python3 -m json.tool | head -4
+
+docker service ls --format '{{.Name}} {{.Replicas}}' | grep worker
 
 ```bash
 curl -i -X POST "https://umxgluptdopldndqjbvx.supabase.co/rest/v1/rpc/spine_ensure_call" \

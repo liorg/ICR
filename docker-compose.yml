@@ -67,7 +67,7 @@ services:
       SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
       SWARM_NETWORK: "scenario_spine-net"
       SPINE_URL: "http://scenario_data-spine:8000"
-      WORKER_IMAGE: "liorgr/worker-scenario-runtime:latest"
+      WORKER_IMAGE: "${WORKER_IMAGE:-liorgr/worker-scenario-runtime:sha-f952da6}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     deploy:

@@ -83,7 +83,13 @@ func reconcile() {
 	for _, phone := range phoneList {
 		w, exists := existing[phone.ID]
 		if exists && w.Status == "running" {
-			continue
+			// ה-DB אומר running — אבל אם השירות נמחק ידנית,
+			// דילוג כאן משאיר את המערכת תקועה לצמיתות:
+			// אין worker, וה-Spine שולח ל-DNS מת.
+			if err := exec.Command("docker", "service", "inspect", w.ServiceName).Run(); err == nil {
+				continue
+			}
+			log.Printf("Service %s marked running but missing — recreating", w.ServiceName)
 		}
 
 		cleanNum := strings.TrimPrefix(phone.Number, "+")
@@ -141,6 +147,9 @@ func createService(name, phoneID, phoneNumber string) error {
 		"--env", "SERVICE_NAME=" + name,
 		"--env", "PORT=9000",
 		"--env", "SPINE_URL=" + spineURL,
+		// WhatsAppSender.cs קורא WA_FASTAPI_URL, לא SPINE_URL.
+		// בלעדיו הוא נופל ל-http://localhost:8001 וכל שליחה מחזירה 404.
+		"--env", "WA_FASTAPI_URL=" + spineURL,
 		"--env", "DENO_BIN=/usr/local/bin/deno",
 		"--env", "DENO_TMPDIR=/tmp/deno-scripts",
 		workerImage,

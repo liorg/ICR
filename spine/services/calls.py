@@ -20,8 +20,23 @@ from typing import Optional
 import httpx
 from postgrest.exceptions import APIError
 
+log = logging.getLogger("spine.services.calls")
 
 WORKER_PORT = 9000
+
+
+def _rpc(db, fn: str, params: dict) -> dict:
+    """
+    postgrest 0.17.2 מפיל ValidationError על RPC שמחזיר jsonb חופשי
+    ועוטף אותו כ-APIError — למרות שה-HTTP היה 200 וה-RPC הצליח.
+    """
+    try:
+        return db.rpc(fn, params).execute().data or {}
+    except APIError as e:
+        body = e.args[0] if e.args else None
+        if isinstance(body, dict) and "code" in body:
+            return body      # תשובת RPC תקינה שנעטפה בטעות
+        raise
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -42,19 +57,6 @@ class CallResult:
         self.body["delivered"] = delivered
         return self
 
-def _rpc(db, fn: str, params: dict) -> dict:
-    """
-    postgrest 0.17.2 מפיל ValidationError על RPC שמחזיר jsonb חופשי
-    ועוטף אותו כ-APIError — למרות שה-HTTP היה 200 וה-RPC הצליח.
-    """
-    try:
-        return db.rpc(fn, params).execute().data or {}
-    except APIError as e:
-        body = e.args[0] if e.args else None
-        if isinstance(body, dict) and "code" in body:
-            return body      # תשובת RPC תקינה שנעטפה בטעות
-        raise
-log = logging.getLogger("spine.services.calls")
 
 # ══════════════════════════════════════════════════════════════════════
 # Worker plane
@@ -173,20 +175,17 @@ async def ensure_call(
       - יצירת running / queued / blocked תחת lock אטומי
     """
 
-    res = (
-        db.rpc(
-            "spine_ensure_call",
-            {
-                "p_phone_id": phone_id,
-                "p_contact_id": contact_id,
-                "p_scenario_id": scenario_id,
-                "p_priority": priority,
-                "p_source": source,
-                "p_schedule_id": schedule_id,
-            },
-        )
-        .execute()
-        .data
+    res = _rpc(
+        db,
+        "spine_ensure_call",
+        {
+            "p_phone_id": phone_id,
+            "p_contact_id": contact_id,
+            "p_scenario_id": scenario_id,
+            "p_priority": priority,
+            "p_source": source,
+            "p_schedule_id": schedule_id,
+        },
     )
 
     if not isinstance(res, dict):
@@ -286,10 +285,10 @@ async def ensure_call(
 # ══════════════════════════════════════════════════════════════════════
 async def complete_call(db, call_id: str, status: str = "completed") -> CallResult:
 
-    res = db.rpc("spine_complete_call", {
+    res = _rpc(db, "spine_complete_call", {
         "p_call_id": call_id,
         "p_status":  status,
-    }).execute().data or {}
+    })
 
     code = res.get("code")
     log.info("[COMPLETE] %s | call=%s next=%s", code, call_id, res.get("next_call_id"))

@@ -13,30 +13,46 @@ spine/services/calls.py — שכבת הלוגיקה של calls.
         res.delivered = await send_to_worker(db, res.phone_id, res.worker_payload)
     return res.http_status, res.body
 """
-import json, logging
+import json, logging, os
 from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
-from postgrest.exceptions import APIError
 
 log = logging.getLogger("spine.services.calls")
 
 WORKER_PORT = 9000
 
 
-def _rpc(db, fn: str, params: dict) -> dict:
+async def _rpc(fn: str, params: dict) -> dict:
     """
-    postgrest 0.17.2 מפיל ValidationError על RPC שמחזיר jsonb חופשי
-    ועוטף אותו כ-APIError — למרות שה-HTTP היה 200 וה-RPC הצליח.
+    קריאת RPC ישירות מול PostgREST, בעקיפת postgrest-py.
+
+    למה: postgrest 0.17/2.x נכשל בפרסור תשובות שמכילות UTF-8 (עברית)
+    ומחזיר APIError עם code=200 — למרות שה-RPC הצליח וה-HTTP היה 200.
+    התרחישים כאן מלאים עברית, אז מפרסרים את הבייטים בעצמנו.
     """
-    try:
-        return db.rpc(fn, params).execute().data or {}
-    except APIError as e:
-        body = e.args[0] if e.args else None
-        if isinstance(body, dict) and "code" in body:
-            return body      # תשובת RPC תקינה שנעטפה בטעות
-        raise
+    base = os.environ["SUPABASE_URL"].rstrip("/")
+    key  = os.environ["SUPABASE_SERVICE_KEY"]
+
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.post(
+            f"{base}/rest/v1/rpc/{fn}",
+            json=params,
+            headers={
+                "apikey":        key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type":  "application/json",
+                "Accept":        "application/json",
+            },
+        )
+
+    if r.status_code >= 400:
+        log.error("[RPC] %s failed | status=%s body=%s", fn, r.status_code, r.text[:300])
+        raise RuntimeError(f"{fn} failed with HTTP {r.status_code}")
+
+    # decode מפורש — לא לסמוך על ניחוש הקידוד של הקליינט
+    return json.loads(r.content.decode("utf-8")) or {}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -175,8 +191,7 @@ async def ensure_call(
       - יצירת running / queued / blocked תחת lock אטומי
     """
 
-    res = _rpc(
-        db,
+    res = await _rpc(
         "spine_ensure_call",
         {
             "p_phone_id": phone_id,
@@ -285,7 +300,7 @@ async def ensure_call(
 # ══════════════════════════════════════════════════════════════════════
 async def complete_call(db, call_id: str, status: str = "completed") -> CallResult:
 
-    res = _rpc(db, "spine_complete_call", {
+    res = await _rpc("spine_complete_call", {
         "p_call_id": call_id,
         "p_status":  status,
     })

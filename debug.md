@@ -6,10 +6,15 @@ select column_name from information_schema.columns
 where table_name = 'spine_leaf_messages';
 
 
-# e
+##bash command
 ```bash
 
+docker exec $(docker ps -q -f name=scenario_data-spine) pip list 2>/dev/null | grep -Ei "postgrest|supabase"
+
+
+
 ```bash
+
 select p.oid::regprocedure as signature
 from pg_proc p
 join pg_namespace n on n.oid = p.pronamespace

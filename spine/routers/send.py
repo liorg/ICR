@@ -75,19 +75,22 @@ async def send_message(phone_id: str, req: SendReq):
 
 
     if req.leaf_id and req.call_id and wa_id:
-        db.table("spine_leaf_messages").upsert(
-            {
-                "scenario_id": req.scenario_id,
-                "call_id": req.call_id,
-                "leaf_id": req.leaf_id,
-                "whatsapp_message_id": wa_id,
-                "message_id": None,
-            },
-            on_conflict="scenario_id,call_id,leaf_id,whatsapp_message_id",
-        ).execute()
+        # SendReq אינו מכיל scenario_id, ו-leaf_id ייחודי גלובלית —
+        # לכן הזהות היא (leaf_id, message_id), כמו ב-worker_events.
+        try:
+            db.table("spine_leaf_messages").upsert(
+                {
+                    "call_id": req.call_id,
+                    "leaf_id": req.leaf_id,
+                    "whatsapp_message_id": wa_id,
+                },
+                on_conflict="leaf_id,message_id",
+            ).execute()
+        except Exception:
+            log.exception("Failed linking outgoing leaf | call=%s leaf=%s whatsapp=%s",
+                          req.call_id, req.leaf_id, wa_id)
 
     if status == "failed":
         raise HTTPException(502, f"HostAgent send failed for phone {phone_id}")
 
     return { "ok": True,  "message_id": wa_id,  "wa_message_id": wa_id,"status": status}
-    

@@ -5,8 +5,16 @@
 select column_name from information_schema.columns
 where table_name = 'spine_leaf_messages';
 
+curl -s &quot;https://hub.docker.com/v2/repositories/liorgr/worker-scenario-runtime/tags/?page_size=25&quot; \
+  | python3 -c &quot;import sys,json; d=json.load(sys.stdin); print(d.get(&apos;count&apos;)); [print(t[&apos;name&apos;], t[&apos;last_updated&apos;]) for t in d.get(&apos;results&apos;,[])]&quot;
 
-## bash command
+docker service rm worker-972504477197-1ff94cfa
+cd /opt/ICR && ./deploy.sh
+
+grep -A12 "provisioner:" /opt/ICR/docker-compose.yml
+
+
+## bash 
 ```bash
 
 docker exec $(docker ps -q -f name=scenario_data-spine) pip list 2>/dev/null | grep -Ei "postgrest|supabase"

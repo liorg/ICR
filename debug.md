@@ -76,5 +76,6 @@ alt-svc: h3=":443"; ma=86400
 
 
 
-
+update phone_workers set status = 'stopped'
+where phone_id = '1ff94cfa-a381-4606-8bbc-f0d36abe8005';
 

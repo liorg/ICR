@@ -41,7 +41,7 @@ services:
       # ── Spine → HostAgent ────────────────────────────────────────────
       HOST_AGENT_URL: "${HOST_AGENT_URL:-http://10.186.0.2:5000}"
       # הנתיב בקונטרולר השליחה. {phone_id} ו-{type} מוחלפים בזמן ריצה.
-      HOST_AGENT_SEND_PATH: "${HOST_AGENT_SEND_PATH:-/api/phones/{phone_id}/send/{type}}"
+      HOST_AGENT_SEND_PATH: "${HOST_AGENT_SEND_PATH}"
 
       # ── רישום ה-webhook ──────────────────────────────────────────────
       # חייב להתאים בדיוק ל-WebhookRegistrationType.Trigger ב-HostAgent,

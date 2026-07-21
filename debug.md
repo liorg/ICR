@@ -1,12 +1,12 @@
 
 
-##sql
+## sql
 ```bash
 select column_name from information_schema.columns
 where table_name = 'spine_leaf_messages';
 
 
-##bash command
+## bash command
 ```bash
 
 docker exec $(docker ps -q -f name=scenario_data-spine) pip list 2>/dev/null | grep -Ei "postgrest|supabase"
@@ -24,8 +24,12 @@ where n.nspname = 'public'
 
 ##post
 
-#ensure
+## ensure
+
 ```bash
+curl -i -X POST http://10.186.0.3:8001/api/calls/59e04ac0-56fb-4772-8818-2ed27d7b6d0e/complete \
+  -H "Content-Type: application/json" -d '{"status":"completed"}'
+
 curl -i -X POST http://10.186.0.3:8001/api/calls/ensure \
   -H "Content-Type: application/json" \
   -d '{"phone_id":"1ff94cfa-a381-4606-8bbc-f0d36abe8005","contact_id":"6217f567-2931-4157-a7ae-1521f53a5f9e","scenario_id":"df3b78c2-ac5f-4c8a-be39-cd7ff32da3ea","source":"api"}'
@@ -39,7 +43,7 @@ curl -i -X POST "https://umxgluptdopldndqjbvx.supabase.co/rest/v1/rpc/spine_ensu
   -d '{"p_phone_id":"1ff94cfa-a381-4606-8bbc-f0d36abe8005","p_contact_id":"6217f567-2931-4157-a7ae-1521f53a5f9e","p_scenario_id":"df3b78c2-ac5f-4c8a-be39-cd7ff32da3ea","p_source":"api"}'
 #
 
-#result
+# result
 
 HTTP/2 200 
 date: Tue, 21 Jul 2026 12:16:02 GMT

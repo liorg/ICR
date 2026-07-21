@@ -411,9 +411,6 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
     if summary.started_at is not None:
         call_patch["started_at"] = summary.started_at.isoformat()
 
-    if summary.finished_at is not None:
-        call_patch["finished_at"] = summary.finished_at.isoformat()
-
     # מעדכנים רק כאשר כל הזהות שנשלחה תואמת ל-call.
     query = (
         db.table("calls")

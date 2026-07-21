@@ -1,11 +1,31 @@
 
 
-~~bash
+##sql
+```bash
+select column_name from information_schema.columns
+where table_name = 'spine_leaf_messages';
+
+```bash
+select p.oid::regprocedure as signature
+from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public'
+  and p.proname in ('spine_complete_call', 'spine_ensure_call');
+
+
+
+##post
+
+```bash
 curl -i -X POST "https://umxgluptdopldndqjbvx.supabase.co/rest/v1/rpc/spine_ensure_call" \
   -H "apikey: $SUPABASE_SERVICE_KEY" \
   -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
   -H "Content-Type: application/json" \
   -d '{"p_phone_id":"1ff94cfa-a381-4606-8bbc-f0d36abe8005","p_contact_id":"6217f567-2931-4157-a7ae-1521f53a5f9e","p_scenario_id":"df3b78c2-ac5f-4c8a-be39-cd7ff32da3ea","p_source":"api"}'
+
+
+
+
 HTTP/2 200 
 date: Tue, 21 Jul 2026 12:16:02 GMT
 content-type: application/json; charset=utf-8
@@ -25,4 +45,9 @@ x-envoy-attempt-count: 1
 x-envoy-upstream-service-time: 45
 alt-svc: h3=":443"; ma=86400
 
-{"code": "CALL_ALREADY_ACTIVE", "status": "blocked", "message": "Active call exists; source \"api\" is not queued", "active_since": "2026-07-21T12:13:14.525251", "active_call_id": "f55b9dc5-c8fa-49fe-b8e1-15b3070475b0"}lior_grosman@worker-scenario:/opt/ICR$ 
+{"code": "CALL_ALREADY_ACTIVE", "status": "blocked", "message": "Active call exists; source \"api\" is not queued", "active_since": "2026-07-21T12:13:14.525251", "active_call_id": "f55b9dc5-c8fa-49fe-b8e1-15b3070475b0"}lior_grosman@worker-scenario:/opt/ICR$
+
+
+
+
+

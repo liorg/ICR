@@ -27,6 +27,10 @@ def get_due_schedules() -> list[dict[str, Any]]:
     מחזיר תזמונים פעילים שהגיע זמן ההפעלה שלהם.
     """
 
+    # שמות העמודות חייבים להתאים ל-routers/schedules.py (ה-UI):
+    #   next_run / last_run — ולא next_run_at / last_run_at.
+    # ה-UI כותב ל-next_run; קריאה מ-next_run_at מחזירה תמיד ריק,
+    # ולכן שום תזמון לא נורה מעולם.
     result = (
         db.table("schedules")
         .select(
@@ -38,15 +42,13 @@ def get_due_schedules() -> list[dict[str, Any]]:
             "schedule_type,"
             "cron_expr,"
             "run_at,"
-            "timezone,"
-            "priority,"
-            "next_run_at,"
+            "next_run,"
             "status"
         )
         .eq("status", "active")
-        .not_.is_("next_run_at", "null")
-        .lte("next_run_at", utc_now_iso())
-        .order("next_run_at")
+        .not_.is_("next_run", "null")
+        .lte("next_run", utc_now_iso())
+        .order("next_run")
         .limit(MAX_SCHEDULES_PER_POLL)
         .execute()
     )

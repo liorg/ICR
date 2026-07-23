@@ -30,20 +30,22 @@ def process_once_schedule(
             f"body={result.body}"
         )
 
+    # 409 = איש הקשר תפוס. אין טעם לנסות שוב מאוחר יותר עבור once,
+    # אבל כן מסמנים שהירייה קרתה כדי שלא תחזור בלולאה.
     update_schedule(
         schedule_id,
         {
             "status": "completed",
-            "next_run_at": None,
-            "last_run_at": utc_now_iso(),
-            "last_error": None,
+            "next_run": None,
+            "last_run": utc_now_iso(),
         },
     )
 
     log.info(
-        "Once schedule completed | id=%s status=%s",
+        "Once schedule done | id=%s status=%s blocked=%s",
         schedule_id,
         result.http_status,
+        result.blocked,
     )
 
 
@@ -72,32 +74,31 @@ def process_cron_schedule(
             schedule_id,
             {
                 "status": "error",
-                "next_run_at": None,
-                "last_run_at": utc_now_iso(),
-                "last_error": (
-                    "Call accepted but failed calculating next_run_at"
-                ),
+                "next_run": None,
+                "last_run": utc_now_iso(),
             },
         )
 
         raise RuntimeError(
-            f"Could not calculate next_run_at "
+            f"Could not calculate next_run "
             f"for schedule {schedule_id}"
         )
 
+    # גם כשה-call נחסם ב-409 מקדמים את next_run — אחרת התזמון
+    # ינסה שוב כל POLL_SECONDS ולא יגיע לזמן הבא לעולם.
     update_schedule(
         schedule_id,
         {
-            "next_run_at": next_run_at,
-            "last_run_at": utc_now_iso(),
-            "last_error": None,
+            "next_run": next_run_at,
+            "last_run": utc_now_iso(),
         },
     )
 
     log.info(
-        "Cron schedule accepted | id=%s status=%s next=%s",
+        "Cron schedule fired | id=%s status=%s blocked=%s next=%s",
         schedule_id,
         result.http_status,
+        result.blocked,
         next_run_at,
     )
 
@@ -115,7 +116,7 @@ def process_schedule(
         "Processing schedule | id=%s type=%s due=%s",
         schedule_id,
         schedule_type,
-        schedule.get("next_run_at"),
+        schedule.get("next_run"),
     )
 
     if schedule_type == "once":
@@ -130,10 +131,7 @@ def process_schedule(
         schedule_id,
         {
             "status": "error",
-            "next_run_at": None,
-            "last_error": (
-                f"Unsupported schedule_type: {schedule_type}"
-            ),
+            "next_run": None,
         },
     )
 
@@ -174,15 +172,4 @@ def poll_due_schedules() -> None:
                 schedule_id,
             )
 
-            try:
-                update_schedule(
-                    schedule_id,
-                    {
-                        "last_error": str(exc)[:1000],
-                    },
-                )
-            except Exception:
-                log.exception(
-                    "Failed saving schedule error | id=%s",
-                    schedule_id,
-                )
+            # אין עמודת last_error בסכמה — השגיאה נשארת בלוג בלבד.

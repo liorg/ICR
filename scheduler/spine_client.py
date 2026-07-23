@@ -18,6 +18,17 @@ class EnsureResult:
     http_status: int
     body: dict[str, Any]
 
+    @property
+    def blocked(self) -> bool:
+        """
+        409 = יש כבר call פעיל לאיש הקשר.
+
+        זה לא כשל: source='scheduler' נחסם בכוונה ולא נכנס לתור.
+        התזמון פשוט מדלג על הירייה הזו וממשיך לזמן הבא — אחרת
+        next_run לא מתעדכן והוא ינסה שוב כל POLL_SECONDS לנצח.
+        """
+        return self.http_status == 409
+
 
 def ensure_call(
     schedule: dict[str, Any],
@@ -48,7 +59,8 @@ def ensure_call(
         }
 
     return EnsureResult(
-        accepted=response.status_code in (200, 201, 202),
+        # 409 נחשב מקובל: ה-call נחסם בכוונה, לא נכשל.
+        accepted=response.status_code in (200, 201, 202, 409),
         http_status=response.status_code,
         body=body,
     )

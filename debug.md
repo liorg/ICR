@@ -21,10 +21,18 @@ where id = 'cc43576c-42a3-425c-a833-589d91597b78';
 select column_name from information_schema.columns
 where table_name = 'spine_leaf_messages';
 ```
-
+docker service logs scenario_data-spine --since 10m 2>&1 | grep -i INCOMING
 ```bash
 curl -s &quot;https://hub.docker.com/v2/repositories/liorgr/worker-scenario-runtime/tags/?page_size=25&quot; \
   | python3 -c &quot;import sys,json; d=json.load(sys.stdin); print(d.get(&apos;count&apos;)); [print(t[&apos;name&apos;], t[&apos;last_updated&apos;]) for t in d.get(&apos;results&apos;,[])]&quot;
+```
+
+```bash
+$ docker service logs worker-972504476645-3beff8fa --since 20m 2>&1 | grep -E "Reply|mismatch|Step|Skip"
+```
+
+```bash
+update calls set status = 'aborted', ended_at = now()
 ```
 
 ```bash
@@ -58,7 +66,9 @@ docker service logs scenario_data-spine --since 10m 2>&1 | grep -A15 "Failed lin
 docker exec $(docker ps -q -f name=scenario_data-spine) pip list 2>/dev/null | grep -Ei "postgrest|supabase"
 
 ```
-
+דגדשגג
+גק
+גק
 ```bash
 
 docker service logs -f $(docker service ls --format '{{.Name}}' | grep worker)

@@ -458,18 +458,19 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
     call_result = query.execute()
 
     if not call_result.data:
+        # אי-התאמה בזהות פירושה שנתוני הסיכום לא נשמרו — אבל *לא*
+        # עוצרים כאן. בלי complete_call ה-call יישאר running לנצח,
+        # ה-partial unique index יחסום את איש הקשר, והתור לא יתקדם.
+        #
+        # סגירת ה-call חשובה יותר מהסטטיסטיקות. ה-Job מטפל בהשלמת
+        # הנתונים החסרים בנפרד.
         log.warning(
-            "Call not found or summary identity mismatch | "
+            "Summary identity mismatch — stats not saved, closing anyway | "
             "scenario=%s call=%s phone=%s contact=%s",
             summary.scenario_id,
             call_id,
             summary.phone_id,
             summary.contact_id,
-        )
-
-        raise HTTPException(
-            status_code=404,
-            detail="Call not found or summary identity does not match",
         )
 
     # ── סגירת ה-call + קידום הבא בתור ────────────────────────────────

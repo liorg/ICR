@@ -235,9 +235,10 @@ def _load_message(
 
     result = (
         db.table("messages")
+        # messages אין בה payload/event — ה-type יושב בתוך content.
         .select(
-            "id, phone_id, contact_id, call_id, content, payload, "
-            "whatsapp_message_id, direction, status, event, "
+            "id, phone_id, contact_id, call_id, content, "
+            "whatsapp_message_id, direction, status, "
             "sent_at, media_url"
         )
         .eq("id", message_id)
@@ -323,7 +324,7 @@ def _complete_leaf_message_links(
             }
         )
         .eq("whatsapp_message_id", whatsapp_message_id)
-        .is_("message_id", "null")
+        .is_("message_id", None)
         .execute()
     )
 
@@ -342,19 +343,10 @@ def _complete_leaf_message_links(
 def _normalize_message(
     message: dict,
 ) -> tuple[str, Optional[str], dict[str, Any]]:
-    content_obj = _as_dict(message.get("content"))
-    payload_obj = _as_dict(message.get("payload"))
+    # content הוא JSON string: {"text": "...", "type": "text"}
+    merged: dict[str, Any] = _as_dict(message.get("content"))
 
-    merged: dict[str, Any] = {
-        **payload_obj,
-        **content_obj,
-    }
-
-    msg_type = str(
-        merged.get("type")
-        or message.get("event")
-        or "text"
-    )
+    msg_type = str(merged.get("type") or "text")
 
     normalized_type = {
         "conversation": "text",

@@ -9,8 +9,20 @@ select config->'canvas'->1->>'value' as expected_value,
        length(config->'canvas'->1->>'value') as len
 from scenarios where id = 'cc43576c-42a3-425c-a833-589d91597b78';
 
+
 ```
-כןס ךקשכ
+DELETE ALL WORKERSS
+```bash
+docker service ls --format '{{.Name}}' | grep '^worker' | xargs -r docker service rm
+```
+
+
+GET LATEST 
+```bash
+curl -s "https://hub.docker.com/v2/repositories/liorgr/worker-scenario-runtime/tags/?page_size=10" \
+  | python3 -c "import sys,json; [print(t['name'], t['last_updated']) for t in json.load(sys.stdin)['results']]"
+```
+  
 כגדד
 ```bash
 update scenarios

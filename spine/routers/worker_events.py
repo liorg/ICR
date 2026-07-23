@@ -198,7 +198,7 @@ def ingest_leaf(leaf: LeafIn):
                         "message_id": leaf.message_id,
                         "whatsapp_message_id": leaf.whatsapp_message_id,
                     },
-                    on_conflict="leaf_id,message_id",
+                    on_conflict="scenario_id,call_id,leaf_id,whatsapp_message_id",
                 )
                 .execute()
             )
@@ -273,12 +273,36 @@ def update_leaf(body: LeafStatusIn):
             detail="Leaf not found for the supplied scenario, call and leaf IDs",
         )
 
-    # בהודעה נכנסת Worker מעביר message_id פנימי.
-    # לכן מקשרים ישירות לטבלת רבים-לרבים.
+    # בהודעה נכנסת Worker מעביר message_id פנימי — מקשרים ישירות.
     #
-    # בהודעה יוצאת בדרך כלל קיים רק whatsapp_message_id בשלב זה.
-    # הקישור ל-message_id הפנימי מושלם מאוחר יותר ב-incoming.py.
-    if body.message_id:
+    # בשליחה יוצאת מגיע רק whatsapp_message_id, ולכן הבלוק הזה היה מדולג
+    # והקישור נשאר תלוי כולו ב-webhook. אבל ה-webhook לפעמים מקדים את
+    # ה-insert של send.py, לא מוצא שורה לעדכן (completed=0), והקישור
+    # נשאר חסר לתמיד.
+    #
+    # ה-HostAgent שומר את ההודעה ב-messages לפני שהוא יורה את ה-webhook,
+    # ולכן בנקודה הזו אפשר למשוך את המזהה הפנימי ולסגור את הקישור כאן,
+    # בלי תלות בסדר ההגעה.
+    msg_id = body.message_id
+
+    if not msg_id and body.whatsapp_message_id:
+        try:
+            row = (
+                db.table("messages")
+                .select("id")
+                .eq("whatsapp_message_id", body.whatsapp_message_id)
+                .limit(1)
+                .execute()
+                .data
+            )
+            msg_id = row[0]["id"] if row else None
+        except Exception:
+            log.exception(
+                "Failed resolving message_id | whatsapp=%s",
+                body.whatsapp_message_id,
+            )
+
+    if msg_id or body.whatsapp_message_id:
         try:
             (
                 db.table("spine_leaf_messages")
@@ -287,12 +311,18 @@ def update_leaf(body: LeafStatusIn):
                         "scenario_id": body.scenario_id,
                         "call_id": body.call_id,
                         "leaf_id": body.leaf_id,
-                        "message_id": body.message_id,
+                        "message_id": msg_id,
                         "whatsapp_message_id": body.whatsapp_message_id,
                     },
-                    on_conflict="leaf_id,message_id",
+                    on_conflict="scenario_id,call_id,leaf_id,whatsapp_message_id",
                 )
                 .execute()
+            )
+            log.info(
+                "[LEAF-LINK] via status | leaf=%s message=%s whatsapp=%s",
+                body.leaf_id,
+                msg_id,
+                body.whatsapp_message_id,
             )
         except Exception:
             log.exception(
@@ -301,7 +331,7 @@ def update_leaf(body: LeafStatusIn):
                 body.scenario_id,
                 body.call_id,
                 body.leaf_id,
-                body.message_id,
+                msg_id,
                 body.whatsapp_message_id,
             )
 

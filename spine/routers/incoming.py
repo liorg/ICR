@@ -23,8 +23,10 @@ whatsAppMessageId:
 
 import json
 import logging
+import os
 from typing import Any, Optional
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -106,8 +108,7 @@ async def handle_incoming(body: IncomingDispatch):
     # לאחר שה-HostAgent שמר את ההודעה בטבלת messages,
     # משלימים כאן את message_id לפי whatsapp_message_id.
     if not body.direction:
-        linked_count = _complete_leaf_message_links(
-            db,
+        linked_count = await _complete_leaf_message_links(
             whatsapp_message_id=body.whatsapp_message_id,
             internal_message_id=body.message_id,
         )
@@ -291,50 +292,67 @@ def _load_trigger_scenarios(
     )
 
 
-def _complete_leaf_message_links(
-    db,
+async def _complete_leaf_message_links(
     whatsapp_message_id: str,
     internal_message_id: str,
 ) -> int:
     """
     משלים את הקישור הטכני עבור הודעה יוצאת.
 
-    לפני webhook:
+        לפני:   leaf-1 | WA-123 | NULL
+        אחרי:   leaf-1 | WA-123 | MSG-789
 
-        leaf_id | whatsapp_message_id | message_id
-        leaf-1  | WA-123              | NULL
+    כל השורות עם אותו whatsapp_message_id מתעדכנות — קשר רבים-לרבים.
 
-    לאחר webhook:
-
-        leaf_id | whatsapp_message_id | message_id
-        leaf-1  | WA-123              | MSG-789
-
-    כל השורות המתאימות ל-whatsapp_message_id מתעדכנות,
-    ולכן נשמרת תמיכה בקשר רבים-לרבים.
+    ה-UPDATE נבנה ידנית מול PostgREST ולא דרך postgrest-py:
+      • .is_() לא מייצר את הפילטר is.null כמו שצריך
+      • בלי Prefer: return=representation התשובה ריקה, אז אי אפשר לספור
+    זה בדיוק ה-PATCH שאומת ידנית ב-curl.
     """
-
     if not whatsapp_message_id or not internal_message_id:
         return 0
 
-    result = (
-        db.table("spine_leaf_messages")
-        .update(
-            {
-                "message_id": internal_message_id,
-            }
-        )
-        .eq("whatsapp_message_id", whatsapp_message_id)
-        .is_("message_id", None)
-        .execute()
+    base = os.environ["SUPABASE_URL"].rstrip("/")
+    key  = os.environ["SUPABASE_SERVICE_KEY"]
+
+    url = (
+        f"{base}/rest/v1/spine_leaf_messages"
+        f"?whatsapp_message_id=eq.{whatsapp_message_id}"
+        f"&message_id=is.null"
     )
 
-    linked_count = len(result.data or [])
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.patch(
+                url,
+                json={"message_id": internal_message_id},
+                headers={
+                    "apikey":        key,
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type":  "application/json",
+                    "Prefer":        "return=representation",
+                },
+            )
+    except Exception:
+        log.exception("[LEAF-LINK] request failed | whatsapp=%s", whatsapp_message_id)
+        return 0
+
+    rows = []
+    if r.status_code < 400 and r.content:
+        try:
+            parsed = json.loads(r.content.decode("utf-8"))
+            rows = parsed if isinstance(parsed, list) else []
+        except Exception:
+            rows = []
+
+    linked_count = len(rows)
 
     log.info(
-        "[LEAF-LINK] whatsapp=%s message=%s completed=%s",
+        "[LEAF-LINK] whatsapp=%s message=%s completed=%s status=%s",
         whatsapp_message_id,
         internal_message_id,
         linked_count,
+        r.status_code,
     )
 
     return linked_count

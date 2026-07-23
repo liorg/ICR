@@ -10,7 +10,13 @@ select config->'canvas'->1->>'value' as expected_value,
 from scenarios where id = 'cc43576c-42a3-425c-a833-589d91597b78';
 
 ```
-
+כןס ךקשכ
+כגדד
+```bash
+update scenarios
+set config = jsonb_set(config, '{canvas,1,value}', '"שלום"')
+where id = 'cc43576c-42a3-425c-a833-589d91597b78';
+```
 ```bash
 select column_name from information_schema.columns
 where table_name = 'spine_leaf_messages';

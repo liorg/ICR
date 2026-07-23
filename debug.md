@@ -2,19 +2,36 @@
 
 ## sql
 
+TEST LEAF
+
+```bash
+select config->'canvas'->1->>'value' as expected_value,
+       length(config->'canvas'->1->>'value') as len
+from scenarios where id = 'cc43576c-42a3-425c-a833-589d91597b78';
+
+```
 
 ```bash
 select column_name from information_schema.columns
 where table_name = 'spine_leaf_messages';
+```
 
+```bash
 curl -s &quot;https://hub.docker.com/v2/repositories/liorgr/worker-scenario-runtime/tags/?page_size=25&quot; \
   | python3 -c &quot;import sys,json; d=json.load(sys.stdin); print(d.get(&apos;count&apos;)); [print(t[&apos;name&apos;], t[&apos;last_updated&apos;]) for t in d.get(&apos;results&apos;,[])]&quot;
+```
 
+```bash
 docker service rm worker-972504477197-1ff94cfa
+
+```
+```bash
 cd /opt/ICR && ./deploy.sh
 
+```
+```bash
 grep -A12 "provisioner:" /opt/ICR/docker-compose.yml
-
+```
 
 ## bash
 

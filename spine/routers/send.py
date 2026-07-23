@@ -75,17 +75,15 @@ async def send_message(phone_id: str, req: SendReq):
 
 
     if req.leaf_id and req.call_id and wa_id:
-        # SendReq אינו מכיל scenario_id, ו-leaf_id ייחודי גלובלית —
-        # לכן הזהות היא (leaf_id, message_id), כמו ב-worker_events.
+        # שליחה יוצאת = leaf חדש תמיד.
+        # message_id נשאר NULL ומושלם ב-incoming.py כשה-webhook חוזר
+        # (_complete_leaf_message_links מחפש בדיוק שורות כאלה).
         try:
-            db.table("spine_leaf_messages").upsert(
-                {
-                    "call_id": req.call_id,
-                    "leaf_id": req.leaf_id,
-                    "whatsapp_message_id": wa_id,
-                },
-                on_conflict="leaf_id,message_id",
-            ).execute()
+            db.table("spine_leaf_messages").insert({
+                "call_id": req.call_id,
+                "leaf_id": req.leaf_id,
+                "whatsapp_message_id": wa_id,
+            }).execute()
         except Exception:
             log.exception("Failed linking outgoing leaf | call=%s leaf=%s whatsapp=%s",
                           req.call_id, req.leaf_id, wa_id)

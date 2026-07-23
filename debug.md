@@ -20,7 +20,7 @@ grep -A12 "provisioner:" /opt/ICR/docker-compose.yml
 
 # log worker
 ```bash
-
+docker service logs worker-972504476645-3beff8fa --since 3m 2>&1 | tail -40
 docker service logs worker-972504477197-1ff94cfa --since 3m 2>&1 | tail -40
 
 ```
@@ -28,13 +28,22 @@ docker service logs worker-972504477197-1ff94cfa --since 3m 2>&1 | tail -40
 ```bash
 docker service logs scenario_data-spine --since 2m 2>&1 | grep -E "ENSURE|WORKER"
 ```
-
+```bash
+docker service logs scenario_data-spine --since 10m 2>&1 | grep -A15 "Failed linking outgoing" | tail -20
+```
+```bash
 docker exec $(docker ps -q -f name=scenario_data-spine) pip list 2>/dev/null | grep -Ei "postgrest|supabase"
 
+```
+
+```bash
+
 docker service logs -f $(docker service ls --format '{{.Name}}' | grep worker)
+```
+```bash
 
 docker service logs scenario_provisioner --since 2m 2>&1 | tail -20
-
+```
 
 
 docker service logs scenario_data-spine --since 5m 2>&1 | grep -A5 "APIError\|PGRST" | tail -40
@@ -60,7 +69,7 @@ docker service inspect $(docker service ls --format '{{.Name}}' | grep '^worker'
   --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' | grep WA_FASTAPI
 ```
 ואז ensure — וההודעה HELL LIOR צריכה סוף סוף לצאת לטלפון.
-docker service logs worker-972504477197-1ff94cfa --since 3m 2>&1 | grep -iE "Send|error|fail|leaf" | head -15
+docker service logs worker-972504476645-3beff8fa --since 3m 2>&1 | grep -iE "Send|error|fail|leaf" | head -15
 docker service logs scenario_data-spine --since 3m 2>&1 | grep -iE "send|POST /send" | tail -10
 ```bash
 
@@ -77,7 +86,11 @@ where n.nspname = 'public'
 ## ensure
 
 ```bash
-
+ curl -i -X POST http://10.186.0.3:8001/incoming \
+  -H "Content-Type: application/json" \
+  -d '{"messageId":"a10a83f3-8cd6-4d79-93b8-40142d4a138d","whatsAppMessageId":"3EB0A6EA7396598E54AB49","phoneId":"3beff8fa-4dc6-4a03-b70f-17a47fe09529","contactId":"f496e6e0-0d7b-42e9-a9df-f65df23a0042","direction":false}'
+```
+```bash
 curl -s -X POST http://10.186.0.3:8001/api/calls/88abb689-2f39-40c1-b4df-236e9a98113c/complete \
   -H "Content-Type: application/json" -d '{"status":"failed"}'
 ```

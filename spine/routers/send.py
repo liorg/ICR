@@ -36,6 +36,7 @@ class SendReq(BaseModel):
     message_type:  str = "text"
     content:       Optional[str] = None
     metadata:      Optional[Any] = None
+    scenario_id:   Optional[str] = None    # ה-Worker שולח אותו; נדרש למפתח ה-upsert
     leaf_id:       Optional[str] = None
     call_id:       Optional[str] = None
 
@@ -75,15 +76,20 @@ async def send_message(phone_id: str, req: SendReq):
 
 
     if req.leaf_id and req.call_id and wa_id:
-        # שליחה יוצאת = leaf חדש תמיד.
-        # message_id נשאר NULL ומושלם ב-incoming.py כשה-webhook חוזר
-        # (_complete_leaf_message_links מחפש בדיוק שורות כאלה).
+        # אותו מפתח שבו משתמש worker_events — uq_spine_leaf_messages_wa
+        # (scenario_id, call_id, leaf_id, whatsapp_message_id).
+        # upsert ולא insert, כי PATCH /leaves/status עשוי להקדים אותנו.
+        # message_id נשאר NULL ומושלם ע"י ה-webhook או ע"י update_leaf.
         try:
-            db.table("spine_leaf_messages").insert({
-                "call_id": req.call_id,
-                "leaf_id": req.leaf_id,
-                "whatsapp_message_id": wa_id,
-            }).execute()
+            db.table("spine_leaf_messages").upsert(
+                {
+                    "scenario_id": req.scenario_id,
+                    "call_id": req.call_id,
+                    "leaf_id": req.leaf_id,
+                    "whatsapp_message_id": wa_id,
+                },
+                on_conflict="scenario_id,call_id,leaf_id,whatsapp_message_id",
+            ).execute()
         except Exception:
             log.exception("Failed linking outgoing leaf | call=%s leaf=%s whatsapp=%s",
                           req.call_id, req.leaf_id, wa_id)

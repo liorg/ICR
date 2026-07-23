@@ -50,7 +50,15 @@ async def send_message(phone_id: str, req: SendReq):
                                  f"(HostAgent supports: {', '.join(sorted(SUPPORTED))})")
 
     # ── SendTextRequest: jid + text. לא phone/message. ─────────────────
-    payload = {"jid": req.contact_phone, "text": req.content or ""}
+    #
+    # contact_phone מגיע מ-spine_ensure_call בלי סיומת, והוא LID אם קיים
+    # ואחרת מספר. אם נשלח LID עם @s.whatsapp.net, WhatsApp מקבל את
+    # הבקשה אך לא מוצא נמען — ההודעה נעלמת בשקט בלי message_status.
+    jid = req.contact_phone
+    if "@" not in jid:
+        jid = f"{jid}@lid" if len(jid) >= 14 else f"{jid}@s.whatsapp.net"
+
+    payload = {"jid": jid, "text": req.content or ""}
 
     meta = req.metadata or {}
     if req.message_type == "buttons":
@@ -69,8 +77,8 @@ async def send_message(phone_id: str, req: SendReq):
             wa_id  = result.get("messageId") or (result.get("key") or {}).get("id")
             status = "sent" if resp.status_code == 200 else "failed"
             if status == "failed":
-                log.error("Send rejected | phone=%s url=%s status=%s body=%s",
-                          phone_id, url, resp.status_code, resp.text[:200])
+                log.error("Send rejected | phone=%s jid=%s url=%s status=%s body=%s",
+                          phone_id, jid, url, resp.status_code, resp.text[:200])
     except Exception as e:
         log.error("Send failed | phone=%s url=%s: %s", phone_id, url, e)
 

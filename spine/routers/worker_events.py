@@ -503,6 +503,40 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
             result.body.get("delivered"),
         )
 
+        # ── רשת ביטחון: init שלא נמסר ────────────────────────────────
+        #
+        # spine_complete_call כבר קידם את ה-call ל-running. אם ה-init
+        # לא הגיע ל-Worker — הוא מת, ה-DNS שבור, או שה-Worker דחה כי
+        # הסשן הקודם עדיין לא נוקה — ה-call יישאר running בלי שאיש
+        # מריץ אותו, וה-partial unique index יחסום את איש הקשר לנצח.
+        #
+        # מחזירים אותו לתור כדי שה-complete הבא ינסה שוב.
+        if not delivery:
+            next_call_id = result.body.get("next_call_id")
+
+            if next_call_id:
+                try:
+                    (
+                        db.table("calls")
+                        .update({
+                            "status": "queued",
+                            "started_at": None,
+                        })
+                        .eq("id", next_call_id)
+                        .eq("status", "running")
+                        .execute()
+                    )
+
+                    log.warning(
+                        "[SUMMARY] init not delivered — call %s returned to queue",
+                        next_call_id,
+                    )
+                except Exception:
+                    log.exception(
+                        "[SUMMARY] failed returning call %s to queue",
+                        next_call_id,
+                    )
+
     log.info(
         "[SUMMARY] scenario=%s call=%s status=%s "
         "duration=%ds sender=%d expected=%d mismatches=%d result=%s",

@@ -23,8 +23,6 @@ log = logging.getLogger("spine.services.calls")
 
 WORKER_PORT = 9000
 
-SPINE_SELF_URL = os.getenv("SPINE_SELF_URL", "http://localhost:8000").rstrip("/")
-
 # מקור אמת משותף ל-Summary ול-webhook.
 CALL_END_EMOJI = os.getenv("CALL_END_EMOJI", "✅").strip() or "✅"
 CALL_END_TYPE = "call_end"
@@ -90,121 +88,88 @@ async def send_call_end_marker(
     final_status: str,
 ) -> dict:
     """
-    שולח חותמת סיום דרך endpoint השליחה של Spine.
+    משגר חותמת סיום דרך endpoint השליחה של Spine.
 
-    חשוב לעבור דרך /send/{phone_id}, ולא ישירות ל-HostAgent:
-      • send.py שומר את call_id על messages
-      • send.py שומר metadata שמסמן CALL_END_TYPE
-      • ה-webhook החוזר יכול לזהות את ההודעה ולעדכן את ה-call
+    קריאה ישירה לפונקציה ולא HTTP ל-SPINE_SELF_URL: זה אותו תהליך,
+    אז round trip דרך ה-overlay רק מוסיף latency, תלות במשתנה סביבה
+    נוסף, וסיכון ש-Spine עמוס ימתין לעצמו.
 
-    החותמת אינה Leaf ואינה אירוע Worker.
+    אין SELECT או בדיקות מקדימות — שולחים as-is. אישור אמיתי מתקבל
+    רק מה-webhook שמעדכן את last_send_time / last_whatsapp_id /
+    last_message_id.
+
+    contact_phone נשלף כאן כי SendReq דורש אותו כ-jid. זו שאילתה
+    אחת קצרה, לא בדיקה מקדימה: בלעדיה הבקשה נדחית ב-422.
     """
-    contact_rows = (
-        db.table("contacts")
-        .select("id, number, lid")
-        .eq("id", contact_id)
-        .eq("phone_id", phone_id)
-        .limit(1)
-        .execute()
-        .data
-    )
-
-    if not contact_rows:
-        log.error(
-            "[CALL-END] contact not found | call=%s phone=%s contact=%s",
-            call_id,
-            phone_id,
-            contact_id,
-        )
-        return {
-            "ok": False,
-            "code": "CONTACT_NOT_FOUND",
-        }
-
-    contact = contact_rows[0]
-    jid = contact.get("lid") or contact.get("number") or ""
-
-    if not jid:
-        log.error(
-            "[CALL-END] contact has no jid | call=%s phone=%s contact=%s",
-            call_id,
-            phone_id,
-            contact_id,
-        )
-        return {
-            "ok": False,
-            "code": "CONTACT_JID_MISSING",
-        }
-
-    payload = {
-        "contact_id": contact_id,
-        "contact_phone": jid,
-        "message_type": "text",
-        "content": CALL_END_EMOJI,
-        "metadata": {
-            "system_type": CALL_END_TYPE,
-            "final_status": final_status,
-        },
-        "leaf_id": None,
-        "call_id": call_id,
-    }
-
-    url = f"{SPINE_SELF_URL}/send/{phone_id}"
+    # import מקומי: routers.send מייבא מ-services.calls, ואימפורט
+    # ברמת המודול היה יוצר מעגל.
+    from routers.send import SendReq, send_message
 
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(url, json=payload)
+        contact = (
+            db.table("contacts")
+            .select("number, lid")
+            .eq("id", contact_id)
+            .limit(1)
+            .execute()
+            .data
+        )
 
-        body = {}
-        if response.content:
-            try:
-                body = json.loads(response.content.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                body = {}
-
-        if response.status_code != 200:
-            log.error(
-                "[CALL-END] send rejected | call=%s status=%s http=%s body=%s",
+        if not contact:
+            log.warning(
+                "[CALL-END] contact not found | call=%s contact=%s",
                 call_id,
-                final_status,
-                response.status_code,
-                response.text[:200],
+                contact_id,
             )
             return {
                 "ok": False,
-                "code": "END_MARKER_REJECTED",
-                "http_status": response.status_code,
+                "code": "END_MARKER_CONTACT_NOT_FOUND",
             }
 
+        contact_phone = (
+            contact[0].get("lid")
+            or contact[0].get("number")
+            or ""
+        )
+
+        await send_message(
+            phone_id,
+            SendReq(
+                contact_id=contact_id,
+                contact_phone=contact_phone,
+                message_type="text",
+                content=CALL_END_EMOJI,
+                metadata={
+                    "system_type": CALL_END_TYPE,
+                    "final_status": final_status,
+                },
+                call_id=call_id,
+            ),
+        )
+
         log.info(
-            "[CALL-END] marker accepted | call=%s status=%s "
-            "message=%s whatsapp=%s",
+            "[CALL-END] marker dispatched | call=%s status=%s",
             call_id,
             final_status,
-            body.get("message_id"),
-            body.get("wa_message_id"),
         )
 
         return {
             "ok": True,
-            "code": "END_MARKER_SENT",
-            "type": CALL_END_TYPE,
-            "emoji": CALL_END_EMOJI,
-            "message_id": body.get("message_id"),
-            "whatsapp_message_id": body.get("wa_message_id"),
+            "code": "END_MARKER_DISPATCHED",
         }
 
     except Exception as exc:
         log.exception(
-            "[CALL-END] send failed | call=%s status=%s error=%s",
+            "[CALL-END] dispatch failed | call=%s status=%s error=%s",
             call_id,
             final_status,
             exc,
         )
         return {
             "ok": False,
-            "code": "END_MARKER_SEND_FAILED",
+            "code": "END_MARKER_DISPATCH_FAILED",
         }
+
 
 def is_call_end_marker(message: dict) -> bool:
     """

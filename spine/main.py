@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from dependencies import get_supabase
-from routers import calls, send, incoming, worker_events, dispatch, active_chats
+from routers import calls, send, incoming, worker_events, dispatch, active_chats ,promote
 
 log = logging.getLogger("spine")
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(name)s — %(message)s", datefmt="%H:%M:%S")
@@ -94,6 +94,8 @@ app.include_router(worker_events.router)             # /events /leaves
                                                      # /calls/{id}/summary       ← Worker (סוגר call + מקדם תור)
 app.include_router(active_chats.router)               # /active-chats/{phone_id}/...
 app.include_router(dispatch.router, prefix="/api")   # /api/calls/ensure         ← Scheduler + incoming
+                                                     # היה חסר לגמרי: ה-Scheduler קיבל 404 בכל ירייה.
+app.include_router(promote.router,  prefix="/api")   # /api/calls/{id}/promote   ← Scheduler (queue)
                                                      # היה חסר לגמרי: ה-Scheduler קיבל 404 בכל ירייה.
 
 

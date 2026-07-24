@@ -16,6 +16,9 @@ whatsAppMessageId:
     outgoing:
         Spine משלים את הקישור בין leaf לבין messages.
 
+        הודעת חותמת סיום של הבוט אינה הודעת תרחיש רגילה:
+        היא מוחזרת ב-200 ללא קישור Leaf, ללא Trigger וללא Worker.
+
     incoming:
         Spine מנתב את ההודעה ל-Worker.
         ה-Worker מטפל בהתאמת ה-leaf ובסטטוס העסקי.
@@ -24,6 +27,7 @@ whatsAppMessageId:
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -31,10 +35,20 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from dependencies import get_supabase
-from services.calls import ensure_call, entry_payload, send_to_worker
+from services.calls import (
+    ensure_call,
+    entry_payload,
+    is_call_end_marker,
+    send_to_worker,
+)
 
 router = APIRouter(prefix="/incoming", tags=["incoming"])
 log = logging.getLogger("spine.incoming")
+
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class IncomingDispatch(BaseModel):
@@ -93,6 +107,72 @@ async def handle_incoming(body: IncomingDispatch):
                 "whatsAppMessageId, phoneId and contactId"
             ),
         )
+
+    # ── Call end marker ────────────────────────────────────────────────
+    #
+    # ה-Summary של Spine שלח את החותמת דרך HostAgent.
+    # רק לאחר שה-webhook חוזר עם message_id ו-whatsapp_message_id
+    # מעדכנים את ה-call — זו הוכחה שההודעה עברה במסלול הרגיל.
+    if not body.direction and is_call_end_marker(message):
+        marker_call_id = message.get("call_id")
+        updated_data: list[dict] = []
+
+        if marker_call_id:
+            marker_patch = {
+                "last_send_time": message.get("sent_at") or _utc_now(),
+                "last_whatsapp_id": body.whatsapp_message_id,
+                "last_message_id": body.message_id,
+            }
+
+            updated = (
+                db.table("calls")
+                .update(marker_patch)
+                .eq("id", marker_call_id)
+                .eq("phone_id", body.phone_id)
+                .eq("contact_id", body.contact_id)
+                .execute()
+            )
+
+            updated_data = updated.data or []
+
+            if not updated_data:
+                log.warning(
+                    "[CALL-END] call not updated | "
+                    "call=%s phone=%s contact=%s message=%s whatsapp=%s",
+                    marker_call_id,
+                    body.phone_id,
+                    body.contact_id,
+                    body.message_id,
+                    body.whatsapp_message_id,
+                )
+            else:
+                log.info(
+                    "[CALL-END] webhook confirmed | "
+                    "call=%s message=%s whatsapp=%s",
+                    marker_call_id,
+                    body.message_id,
+                    body.whatsapp_message_id,
+                )
+        else:
+            log.warning(
+                "[CALL-END] marker has no call_id | message=%s whatsapp=%s",
+                body.message_id,
+                body.whatsapp_message_id,
+            )
+
+        return {
+            "ok": True,
+            "ignored": True,
+            "reason": "call_end_marker",
+            "incoming": False,
+            "call_id": marker_call_id,
+            "message_id": body.message_id,
+            "whatsapp_message_id": body.whatsapp_message_id,
+            "call_updated": bool(updated_data),
+            "leaf_links_completed": 0,
+            "routed_to_active": False,
+            "triggered": 0,
+        }
 
     # ── Outgoing ───────────────────────────────────────────────────────
     #
@@ -240,7 +320,7 @@ def _load_message(
         .select(
             "id, phone_id, contact_id, call_id, content, "
             "whatsapp_message_id, direction, status, "
-            "sent_at, media_url"
+            "sent_at, media_url, metadata, message_type"
         )
         .eq("id", message_id)
         .eq("whatsapp_message_id", whatsapp_message_id)

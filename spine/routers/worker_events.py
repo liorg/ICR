@@ -19,8 +19,11 @@ Worker → Spine.
 Leaves נשלחים בזמן אמת דרך POST /leaves ומתעדכנים דרך PATCH /leaves/status.
 
 ה-Summary הוא אות הסיום של התרחיש:
-הוא שומר נתוני סיכום, סוגר את ה-call ומקדם את הבא בתור.
-ה-Worker אינו צריך לדעת על ניהול התור.
+הוא שומר נתוני סיכום וסוגר את ה-call בלבד.
+
+הוא אינו מקדם queued ל-running ואינו שולח init ל-Worker.
+הפעלת calls מתבצעת רק דרך ensure_call, שנקרא מ-API, Scheduler או Trigger.
+ה-Job החיצוני אחראי לטיפול בתור.
 """
 
 import logging
@@ -31,7 +34,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from dependencies import get_supabase
-from services.calls import complete_call, send_to_worker
+from services.calls import send_call_end_marker
 
 
 router = APIRouter(tags=["worker-events"])
@@ -392,11 +395,11 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
 
     1. אימות שזהו ה-call הנכון.
     2. שמירת נתוני הסיכום על ה-call.
-    3. סגירת ה-call.
-    4. קידום ה-call הבא בתור.
-    5. שליחת ה-call הבא ל-Worker.
+    3. סגירת ה-call בלבד.
 
     הוא אינו שומר או מעדכן Leaves.
+    הוא אינו מקדם תור ואינו שולח דבר ל-Worker.
+    מי שמפעיל call הוא ensure_call דרך API, Scheduler או Trigger.
     """
 
     # אותו call_id חייב להופיע ב-URL וב-body.
@@ -426,6 +429,25 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
 
     db = get_supabase()
 
+    call_rows = (
+        db.table("calls")
+        .select("id, phone_id, contact_id, status")
+        .eq("id", call_id)
+        .limit(1)
+        .execute()
+        .data
+    )
+
+    if not call_rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Call not found",
+        )
+
+    call_row = call_rows[0]
+    call_phone_id = summary.phone_id or call_row.get("phone_id") or ""
+    call_contact_id = summary.contact_id or call_row.get("contact_id") or ""
+
     call_patch: dict[str, Any] = {
         "duration_seconds": summary.duration_seconds,
         "last_step_id": summary.last_step_id,
@@ -440,6 +462,9 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
     # לא שולחים None כדי לא למחוק תאריך קיים.
     if summary.started_at is not None:
         call_patch["started_at"] = summary.started_at.isoformat()
+
+    if summary.finished_at is not None:
+        call_patch["ended_at"] = summary.finished_at.isoformat()
 
     # מעדכנים רק כאשר כל הזהות שנשלחה תואמת ל-call.
     query = (
@@ -458,14 +483,11 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
     call_result = query.execute()
 
     if not call_result.data:
-        # אי-התאמה בזהות פירושה שנתוני הסיכום לא נשמרו — אבל *לא*
-        # עוצרים כאן. בלי complete_call ה-call יישאר running לנצח,
-        # ה-partial unique index יחסום את איש הקשר, והתור לא יתקדם.
-        #
-        # סגירת ה-call חשובה יותר מהסטטיסטיקות. ה-Job מטפל בהשלמת
-        # הנתונים החסרים בנפרד.
+        # הסטטיסטיקות נשמרות רק כאשר כל הזהות תואמת.
+        # גם במקרה של mismatch עדיין מנסים לסגור לפי call_id בלבד,
+        # כדי שלא יישאר call במצב running.
         log.warning(
-            "Summary identity mismatch — stats not saved, closing anyway | "
+            "Summary identity mismatch — stats not saved, closing by call_id | "
             "scenario=%s call=%s phone=%s contact=%s",
             summary.scenario_id,
             call_id,
@@ -473,70 +495,69 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
             summary.contact_id,
         )
 
-    # ── סגירת ה-call + קידום הבא בתור ────────────────────────────────
+    # ── סגירת ה-call בלבד ─────────────────────────────────────────────
     #
-    # בלעדי הסגירה ה-call יישאר running,
-    # ה-partial unique index יחסום calls עתידיים לאותו contact,
-    # והתור לא יתקדם.
+    # אין כאן complete_call RPC:
+    #   • לא בוחרים queued הבא
+    #   • לא משנים queued ל-running
+    #   • לא שולחים init ל-Worker
     #
-    # ה-Worker אינו יודע שקיים תור.
+    # ה-Job החיצוני מטפל בתור, וכל הפעלה עוברת דרך ensure_call.
+    close_patch: dict[str, Any] = {
+        "status": summary.status,
+        "ended_at": (
+            summary.finished_at.isoformat()
+            if summary.finished_at is not None
+            else _now()
+        ),
+    }
 
-    result = await complete_call(
-        db,
-        call_id,
-        summary.status,
+    close_result = (
+        db.table("calls")
+        .update(close_patch)
+        .eq("id", call_id)
+        .eq("status", "running")
+        .execute()
     )
 
-    # אם complete_call קידם call מהתור, שולחים אותו ל-Worker.
-    if result.needs_worker:
-        delivery = await send_to_worker(
-            db,
-            result.phone_id,
-            result.worker_payload,
+    if not close_result.data:
+        existing = (
+            db.table("calls")
+            .select("id, status")
+            .eq("id", call_id)
+            .limit(1)
+            .execute()
+            .data
         )
 
-        result.with_delivery(delivery)
+        if not existing:
+            raise HTTPException(
+                status_code=404,
+                detail="Call not found",
+            )
 
-        log.info(
-            "[SUMMARY] next call dispatched | "
-            "call=%s delivered=%s",
-            result.body.get("next_call_id"),
-            result.body.get("delivered"),
-        )
+        current_status = existing[0].get("status")
 
-        # ── רשת ביטחון: init שלא נמסר ────────────────────────────────
-        #
-        # spine_complete_call כבר קידם את ה-call ל-running. אם ה-init
-        # לא הגיע ל-Worker — הוא מת, ה-DNS שבור, או שה-Worker דחה כי
-        # הסשן הקודם עדיין לא נוקה — ה-call יישאר running בלי שאיש
-        # מריץ אותו, וה-partial unique index יחסום את איש הקשר לנצח.
-        #
-        # מחזירים אותו לתור כדי שה-complete הבא ינסה שוב.
-        if not delivery:
-            next_call_id = result.body.get("next_call_id")
+        # Summary כפול הוא idempotent: אם ה-call כבר סופי מחזירים 200.
+        if current_status in FINAL_CALL_STATUSES:
+            code = "CALL_ALREADY_CLOSED"
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Call is not running; current status: {current_status}",
+            )
+    else:
+        code = "CALL_CLOSED"
 
-            if next_call_id:
-                try:
-                    (
-                        db.table("calls")
-                        .update({
-                            "status": "queued",
-                            "started_at": None,
-                        })
-                        .eq("id", next_call_id)
-                        .eq("status", "running")
-                        .execute()
-                    )
-
-                    log.warning(
-                        "[SUMMARY] init not delivered — call %s returned to queue",
-                        next_call_id,
-                    )
-                except Exception:
-                    log.exception(
-                        "[SUMMARY] failed returning call %s to queue",
-                        next_call_id,
-                    )
+    # חותמת הסיום נשלחת תמיד, ללא קשר לסיבת הסיום.
+    # כשל בשליחה אינו פותח מחדש את ה-call ואינו מפעיל Worker.
+    marker_result = await send_call_end_marker(
+        db=db,
+        call_id=call_id,
+        phone_id=call_phone_id,
+        contact_id=call_contact_id,
+        final_status=summary.status,
+    )
 
     log.info(
         "[SUMMARY] scenario=%s call=%s status=%s "
@@ -548,14 +569,14 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
         summary.sender_count,
         summary.expected_count,
         summary.mismatch_count,
-        result.code,
+        code,
     )
 
     return {
         "ok": True,
-        "code": result.code,
+        "code": code,
         "call_id": call_id,
         "status": summary.status,
-        "next_call_id": result.body.get("next_call_id"),
-        "delivered": result.body.get("delivered"),
+        "end_marker_sent": marker_result.get("ok", False),
+        "end_marker_code": marker_result.get("code"),
     }

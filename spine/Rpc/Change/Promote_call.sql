@@ -18,9 +18,6 @@
 
 -- created_at ברירת מחדל, כדי שזמן ההמתנה בתור יהיה ניתן למדידה:
 --   started_at - created_at = כמה זמן חלף מרגע ההודעה ועד שהבוט התחיל.
-alter table public.calls
-    alter column created_at set default now();
-
 
 drop function if exists public.spine_promote_call(uuid);
 

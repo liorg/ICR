@@ -64,3 +64,50 @@ def ensure_call(
         http_status=response.status_code,
         body=body,
     )
+
+
+@dataclass
+class PromoteResult:
+    accepted: bool
+    http_status: int
+    body: dict[str, Any]
+
+    @property
+    def promoted(self) -> bool:
+        return self.body.get("code") == "PROMOTED"
+
+    @property
+    def busy(self) -> bool:
+        """
+        409 = או שיש running לאותו איש קשר, או שה-call כבר לא בתור.
+        בשני המקרים פשוט מדלגים ומנסים בסבב הבא.
+        """
+        return self.http_status == 409
+
+
+def promote_call(call_id: str) -> PromoteResult:
+    """
+    מבקש מה-Spine לקדם call מהתור.
+
+    ה-Scheduler מחליט *מה* לקדם; ה-Spine מאמת שאין running,
+    מקדם ושולח init ל-Worker. האימות חייב להיות שם — כאן אין
+    נעילה, ולכן בדיקה מקומית הייתה משאירה חלון למרוץ.
+    """
+    url = f"{SPINE_URL}/api/calls/{call_id}/promote"
+
+    response = requests.post(
+        url,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+
+    try:
+        body = response.json()
+    except ValueError:
+        body = {"raw": response.text}
+
+    return PromoteResult(
+        # 409 מקובל: התנגשות צפויה, לא כשל.
+        accepted=response.status_code in (200, 409),
+        http_status=response.status_code,
+        body=body,
+    )

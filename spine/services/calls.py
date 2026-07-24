@@ -23,6 +23,12 @@ log = logging.getLogger("spine.services.calls")
 
 WORKER_PORT = 9000
 
+SPINE_SELF_URL = os.getenv("SPINE_SELF_URL", "http://localhost:8000").rstrip("/")
+
+# מקור אמת משותף ל-Summary ול-webhook.
+CALL_END_EMOJI = os.getenv("CALL_END_EMOJI", "✅").strip() or "✅"
+CALL_END_TYPE = "call_end"
+
 
 async def _rpc(fn: str, params: dict) -> dict:
     """
@@ -72,6 +78,188 @@ class CallResult:
     def with_delivery(self, delivered: bool) -> "CallResult":
         self.body["delivered"] = delivered
         return self
+
+
+
+
+async def send_call_end_marker(
+    db,
+    call_id: str,
+    phone_id: str,
+    contact_id: str,
+    final_status: str,
+) -> dict:
+    """
+    שולח חותמת סיום דרך endpoint השליחה של Spine.
+
+    חשוב לעבור דרך /send/{phone_id}, ולא ישירות ל-HostAgent:
+      • send.py שומר את call_id על messages
+      • send.py שומר metadata שמסמן CALL_END_TYPE
+      • ה-webhook החוזר יכול לזהות את ההודעה ולעדכן את ה-call
+
+    החותמת אינה Leaf ואינה אירוע Worker.
+    """
+    contact_rows = (
+        db.table("contacts")
+        .select("id, number, lid")
+        .eq("id", contact_id)
+        .eq("phone_id", phone_id)
+        .limit(1)
+        .execute()
+        .data
+    )
+
+    if not contact_rows:
+        log.error(
+            "[CALL-END] contact not found | call=%s phone=%s contact=%s",
+            call_id,
+            phone_id,
+            contact_id,
+        )
+        return {
+            "ok": False,
+            "code": "CONTACT_NOT_FOUND",
+        }
+
+    contact = contact_rows[0]
+    jid = contact.get("lid") or contact.get("number") or ""
+
+    if not jid:
+        log.error(
+            "[CALL-END] contact has no jid | call=%s phone=%s contact=%s",
+            call_id,
+            phone_id,
+            contact_id,
+        )
+        return {
+            "ok": False,
+            "code": "CONTACT_JID_MISSING",
+        }
+
+    payload = {
+        "contact_id": contact_id,
+        "contact_phone": jid,
+        "message_type": "text",
+        "content": CALL_END_EMOJI,
+        "metadata": {
+            "system_type": CALL_END_TYPE,
+            "final_status": final_status,
+        },
+        "leaf_id": None,
+        "call_id": call_id,
+    }
+
+    url = f"{SPINE_SELF_URL}/send/{phone_id}"
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(url, json=payload)
+
+        body = {}
+        if response.content:
+            try:
+                body = json.loads(response.content.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                body = {}
+
+        if response.status_code != 200:
+            log.error(
+                "[CALL-END] send rejected | call=%s status=%s http=%s body=%s",
+                call_id,
+                final_status,
+                response.status_code,
+                response.text[:200],
+            )
+            return {
+                "ok": False,
+                "code": "END_MARKER_REJECTED",
+                "http_status": response.status_code,
+            }
+
+        log.info(
+            "[CALL-END] marker accepted | call=%s status=%s "
+            "message=%s whatsapp=%s",
+            call_id,
+            final_status,
+            body.get("message_id"),
+            body.get("wa_message_id"),
+        )
+
+        return {
+            "ok": True,
+            "code": "END_MARKER_SENT",
+            "type": CALL_END_TYPE,
+            "emoji": CALL_END_EMOJI,
+            "message_id": body.get("message_id"),
+            "whatsapp_message_id": body.get("wa_message_id"),
+        }
+
+    except Exception as exc:
+        log.exception(
+            "[CALL-END] send failed | call=%s status=%s error=%s",
+            call_id,
+            final_status,
+            exc,
+        )
+        return {
+            "ok": False,
+            "code": "END_MARKER_SEND_FAILED",
+        }
+
+def is_call_end_marker(message: dict) -> bool:
+    """
+    מזהה webhook של חותמת הסיום לפי אותה הגדרה משותפת.
+
+    מאחר שה-HostAgent עשוי לשמור content כ-dict, JSON string או טקסט,
+    הבדיקה תומכת בשלושת המצבים.
+    """
+    metadata = message.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+
+    if isinstance(metadata, dict):
+        marker_type = str(
+            metadata.get("system_type")
+            or metadata.get("type")
+            or ""
+        ).strip().lower()
+
+        if marker_type == CALL_END_TYPE:
+            return True
+
+    content = message.get("content")
+
+    if isinstance(content, dict):
+        text = (
+            content.get("text")
+            or content.get("caption")
+            or ""
+        )
+        return str(text).strip() == CALL_END_EMOJI
+
+    if isinstance(content, str):
+        raw = content.strip()
+
+        if raw == CALL_END_EMOJI:
+            return True
+
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+
+        if isinstance(parsed, dict):
+            text = (
+                parsed.get("text")
+                or parsed.get("caption")
+                or ""
+            )
+            return str(text).strip() == CALL_END_EMOJI
+
+    return False
 
 
 # ══════════════════════════════════════════════════════════════════════

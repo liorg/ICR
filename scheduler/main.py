@@ -9,10 +9,12 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from config import (
     DEFAULT_TIMEZONE,
     POLL_SECONDS,
+    SLA_CHECK_SECONDS,
     SPINE_ENSURE_PATH,
     SPINE_URL,
 )
 from queue_service import promote_queued_calls
+from sla_service import expire_stale_calls
 from schedule_service import poll_due_schedules
 
 
@@ -79,9 +81,27 @@ def main() -> None:
         ),
     )
 
+    # ── SLA: סגירת calls פג-תוקף ────────────────────────────────────
+    #
+    # רץ בתדירות נמוכה יותר — לא צריך לבדוק כל POLL_SECONDS.
+    # פעולת תחזוקה בלבד: UPDATE ישיר ב-DB, בלי Spine ובלי worker.
+    scheduler.add_job(
+        expire_stale_calls,
+        trigger="interval",
+        seconds=SLA_CHECK_SECONDS,
+        id="expire-stale-calls",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=max(
+            SLA_CHECK_SECONDS,
+            30,
+        ),
+    )
+
     # בדיקה מיד בעליית ה-Container
     poll_due_schedules()
     promote_queued_calls()
+    expire_stale_calls()
 
     try:
         scheduler.start()

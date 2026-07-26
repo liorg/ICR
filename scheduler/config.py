@@ -35,3 +35,10 @@ MAX_SCHEDULES_PER_POLL = max(
     int(os.getenv("MAX_SCHEDULES_PER_POLL", "50")),
     1,
 )
+
+# תדירות בדיקת ה-SLA בשניות (סגירת calls פג-תוקף).
+# ברירת מחדל בקוד; הערך התפעולי מנוהל ב-bot_config (sla.check_seconds).
+SLA_CHECK_SECONDS = max(
+    int(os.getenv("SLA_CHECK_SECONDS", "60")),
+    10,
+)

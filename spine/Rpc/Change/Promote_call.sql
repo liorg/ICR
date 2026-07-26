@@ -18,6 +18,9 @@
 
 -- created_at ברירת מחדל, כדי שזמן ההמתנה בתור יהיה ניתן למדידה:
 --   started_at - created_at = כמה זמן חלף מרגע ההודעה ועד שהבוט התחיל.
+alter table public.calls
+    alter column created_at set default now();
+
 
 drop function if exists public.spine_promote_call(uuid);
 
@@ -89,10 +92,24 @@ begin
         );
     end if;
 
+    -- started_at ו-expected_end נקבעים כאן — רגע ההתנעה בפועל.
+    -- estimated_time נלקח מ-scenario_snapshot שכבר על ה-call
+    -- (הגרסה שנשמרה ביצירה), לא מ-scenarios.
     update public.calls
     set
-        status     = 'running',
-        started_at = now()
+        status       = 'running',
+        started_at   = now(),
+        expected_end = now() + make_interval(secs =>
+            coalesce(
+                -- safe_int: snapshot מה-UI עלול להיות לא-מספרי.
+                public.safe_int(
+                    v_call.scenario_snapshot->'estimated_time'->>'totalSeconds',
+                    null
+                ),
+                public.bot_config_int('sla.default_estimated_seconds', 120)
+            )
+            + public.bot_config_int('sla.buffer_seconds', 600)
+        )
     where id = p_call_id
       and status = 'queued';
 

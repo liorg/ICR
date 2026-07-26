@@ -138,6 +138,8 @@ begin
     );
 
     begin
+        -- expected_end נקבע רק כאן, בענף שבו started_at = now().
+        -- estimated_time מהתרחיש + buffer מ-bot_config.
         insert into public.calls (
             id,
             scenario_id,
@@ -149,6 +151,7 @@ begin
             source,
             schedule_id,
             started_at,
+            expected_end,
             created_at
         )
         values (
@@ -162,6 +165,17 @@ begin
             p_source,
             p_schedule_id,
             now(),
+            now() + make_interval(secs =>
+                coalesce(
+                    -- safe_int: config מה-UI עלול להיות לא-מספרי; לא מפילים את ה-INSERT.
+                    public.safe_int(
+                        v_scenario.config->'estimated_time'->>'totalSeconds',
+                        null
+                    ),
+                    public.bot_config_int('sla.default_estimated_seconds', 120)
+                )
+                + public.bot_config_int('sla.buffer_seconds', 600)
+            ),
             now()
         );
 

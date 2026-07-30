@@ -318,9 +318,12 @@ def _load_message(
         db.table("messages")
         # messages אין בה payload/event — ה-type יושב בתוך content.
         .select(
+            # messages אין בה metadata/message_type — הן מפילות את
+            # השאילתה ב-42703 (→ 500 על ה-webhook הנכנס). הן גם לא
+            # נצרכות: אף שורה בקובץ לא קוראת אותן. ה-type יושב ב-content.
             "id, phone_id, contact_id, call_id, content, "
             "whatsapp_message_id, direction, status, "
-            "sent_at, media_url, metadata, message_type"
+            "sent_at, media_url"
         )
         .eq("id", message_id)
         .eq("whatsapp_message_id", whatsapp_message_id)

@@ -41,7 +41,16 @@ GET LATEST
 curl -s "https://hub.docker.com/v2/repositories/liorgr/worker-scenario-runtime/tags/?page_size=10" \
   | python3 -c "import sys,json; [print(t['name'], t['last_updated']) for t in json.load(sys.stdin)['results']]"
 ```
-  
+  מכונה 2 (הספיין) — מה שולחים ל-HostAgent:
+
+```bash
+docker service logs scenario_data-spine --since 3m 2>&1 | grep -iE "Send ok|Send rejected|jid=" | tail
+```
+מכונה 1 (HostAgent) — מה Baileys מדווח:
+
+```bash
+journalctl -u whatsapp-manager.service --since "3 min ago" | grep -E "MSG-RAW|Send|err
+```
 כגדד
 ```bash
 update scenarios

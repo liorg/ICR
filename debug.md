@@ -86,6 +86,24 @@ docker service logs worker-972504476645-3beff8fa --since 3m 2>&1 | tail -40
 docker service logs worker-972504477197-1ff94cfa --since 3m 2>&1 | tail -40
 
 ```
+צריך את הלוג של ה-worker:
+זה מצביע על כך שה-webhook הנכנס לא הגיע ל-worker, או הגיע ולא הותאם ל-session.
+
+צריך לראות את מסע ה-"שלום" מהצד הנכנס:
+
+```bash
+docker service logs scenario_data-spine --since 5m 2>&1 | grep -iE "INCOMING|Reply|deliver|route" | tail -15
+```
+```bash
+docker service logs worker-972504476645-3beff8fa --since 5m 2>&1 | grep -vE "DBG" | grep -E "Step|Wait|Reply|expect|s48e776|Compiled"
+
+```
+צריך לראות מה קרה בצד ה-HostAgentכשה-"שלום" הגיע ב-09:57:42:
+
+```bash
+journalctl -u whatsapp-manager.service --since "09:57:00" --until "09:58:30" | grep -iE "MSG-RAW|DISPATCH|incoming"
+```
+
 # log spine
 ```bash
 docker service logs scenario_data-spine --since 2m 2>&1 | grep -E "ENSURE|WORKER"

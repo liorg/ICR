@@ -1,7 +1,26 @@
 
 
 ## sql
+```bash
+-- ═══════════════════════════════════════════════════════════════════════
+-- מי משתמש ב-bot_config_int / safe_int / bot_config
+--
+-- סורק את כל הפונקציות, ה-views וה-triggers ב-DB ומחזיר כל מקום
+-- שמזכיר אותן. הרץ ב-Supabase SQL Editor.
+-- ═══════════════════════════════════════════════════════════════════════
+-- פונקציות שקוראות ל-bot_config_int / safe_int / bot_config
+select
+    p.proname as function_name,
+    pg_get_function_arguments(p.oid) as arguments
+from pg_proc p
+join pg_namespace n on n.oid = p.pronamespace
+where n.nspname = 'public'
+  and p.prokind = 'f'                       -- ← רק פונקציות רגילות, לא aggregates
+  and p.proname not in ('bot_config_int', 'safe_int')
+  and pg_get_functiondef(p.oid) ilike any (array['%bot_config%', '%safe_int%'])
+order by p.proname;
 
+```
 TEST LEAF
 
 ```bash

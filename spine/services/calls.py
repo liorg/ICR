@@ -24,7 +24,7 @@ log = logging.getLogger("spine.services.calls")
 WORKER_PORT = 9000
 
 # מקור אמת משותף ל-Summary ול-webhook.
-CALL_END_EMOJI = os.getenv("CALL_END_EMOJI", "✅").strip() or "✅"
+CALL_END_EMOJI = os.getenv("CALL_END_EMOJI", "🏁🏁").strip() or "🏁🏁"
 CALL_END_TYPE = "call_end"
 
 

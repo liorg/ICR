@@ -138,12 +138,19 @@ docker service logs scenario_provisioner --since 2m 2>&1 | tail -20
 
 
 docker service logs scenario_data-spine --since 5m 2>&1 | grep -A5 "APIError\|PGRST" | tail -40
-
-## list workers
+## LIST workers
+```bash
+docker service ls --format '{{.Name}}' | grep '^worker' 
+```
+## DELETES ALL workers
 ```bash
 docker service ls --format '{{.Name}}' | grep '^worker' | xargs -r docker service rm
 ```
-
+GET VERSION
+```bash
+docker service inspect worker-972504476645-3beff8fa \
+  --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}'
+```
 
 עם ה-Provisioner המתוקן אתה לא צריך לגעת ב-phone_workers — הוא יזהה שהשירות חסר למרות ש-status='running' ויקים אותו מחדש תוך 30 שניות, הפעם עם WA_FASTAPI_URL.
 

@@ -247,5 +247,7 @@ docker service inspect worker-972504476645-3beff8fa \
 ```bash
 docker service logs worker-972504476645-3beff8fa --since 30m 2>&1 | grep -aiB 2 -A 5 "deno\|card_sender\|vkmqply" | tail -30
 
+# הצעד לא אמור יותר להיכשל על invalid host:
+docker service logs worker-972504476645-3beff8fa --since 5m 2>&1 | grep -ai "allow-net\|invalid host\|Running Deno"
 
 ```

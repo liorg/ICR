@@ -210,10 +210,16 @@ for p in json.load(sys.stdin)['paths']:
     if 'send' in p: print(p)
 "
 ```
+השירות קיים ורץ (scenario_scheduler, 1/1). עכשיו הלוגים שלו — זו הפעם הראשונה שנסתכל עליהם:
 
+```bash
+docker service logs scenario_scheduler --since 2h 2>&1 | tail -50
+```
+ואם יש הרבה רעש, ממוקד```:
 
+```bash
+docker service logs scenario_scheduler --since 2h 2>&1 | grep -aE "Found|Processing|fired|done|failed|error|Traceback" | tail -30
 
+```
 
-update phone_workers set status = 'stopped'
-where phone_id = '1ff94cfa-a381-4606-8bbc-f0d36abe8005';
 

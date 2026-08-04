@@ -251,3 +251,10 @@ docker service logs worker-972504476645-3beff8fa --since 30m 2>&1 | grep -aiB 2 
 docker service logs worker-972504476645-3beff8fa --since 5m 2>&1 | grep -ai "allow-net\|invalid host\|Running Deno"
 
 ```
+TEST API
+
+```bash
+curl -s -w "\nHTTP %{http_code}\n"   -X POST "http://10.186.0.2:5000/api/phones/3beff8fa-4dc6-4a03-b70f-17a47fe09529/send/text"   -H 'Content-Type: application/json; charset=utf-8'   --data-binary '{"jid":"46037871886515@lid","text":"איזה כיף לשמוע ממך \uD83D\uDE0A"}' ; echo
+{"success":true,"messageId":"3EB01E142873CC87C887E0"}
+
+```

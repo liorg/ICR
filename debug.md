@@ -222,4 +222,23 @@ docker service logs scenario_scheduler --since 2h 2>&1 | grep -aE "Found|Process
 
 ```
 
+# איפה שירות ה-Deno?
 
+```bash
+docker service ls | grep -i deno ; docker ps | grep -i deno
+
+```
+# לאן ה-Worker מצביע?
+
+```bash
+docker service inspect worker-972504476645-3beff8fa \
+  --format '{{json .Spec.TaskTemplate.ContainerSpec.Env}}' | tr ',' '\n' | grep -i deno
+```
+
+
+# מה השגיאההמדויקת בצעד? (השורות שלפני ה-Send שנכשל)
+```bash
+docker service logs worker-972504476645-3beff8fa --since 30m 2>&1 | grep -aiB 2 -A 5 "deno\|card_sender\|vkmqply" | tail -30
+
+
+```

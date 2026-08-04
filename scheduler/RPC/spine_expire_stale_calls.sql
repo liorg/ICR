@@ -41,9 +41,3 @@ begin
   );
 end;
 $fn$;
-
--- מפתח הקונפיג (אופציונלי — יש ברירת מחדל 30)
-insert into bot_config (key, value, description)
-values ('sla.fallback_minutes', '30',
-        'SLA: פקיעת calls במצב running ללא expected_end אחרי X דקות')
-on conflict (key) do nothing;

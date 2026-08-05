@@ -131,6 +131,12 @@ docker exec $(docker ps -q -f name=scenario_data-spine) pip list 2>/dev/null | g
 
 docker service logs -f $(docker service ls --format '{{.Name}}' | grep worker)
 ```
+
+
+```bash
+docker exec -it $(docker ps -qf "name=worker-972504476645") printenv PHONE_NUMBER
+```
+
 ```bash
 
 docker service logs scenario_provisioner --since 2m 2>&1 | tail -20

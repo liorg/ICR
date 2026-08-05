@@ -1,5 +1,29 @@
 
 
+צור את הפרוביז'נר תחילה
+
+
+משמשת ב־Docker Swarm כדי לשנות את מספר ה־replicas של השירות scenario_provisioner.
+עצור אותו ערך 0
+
+```bash
+docker service scale scenario_provisioner=01
+# או השם המדויק:
+docker service ls | grep provision
+--
+
+
+- סורק את כל הפונקציות, ה-views
+```bash
+docker service scale scenario_provisioner=1
+
+```
+
+משמשת ב־Docker Swarm כדי לשנות את מספר ה־replicas של השירות scenario_provisioner.
+
+
+
+
 ## sql
 ```bash
 -- ═══════════════════════════════════════════════════════════════════════

@@ -1,5 +1,32 @@
 
 
+```bash
+
+docker exec -it $CID sh -c "curl -sm5 http://scenario_data-spine:8000/openapi.json" | python3 -m json.tool 2>/dev/null | grep -A1 '"/' | grep '"/'
+
+
+```
+```bash
+
+docker pull liorgr/worker-scenario-runtime:latest
+docker service update --image liorgr/worker-scenario-runtime:latest --force worker-972504476645-3beff8fa
+```
+
+
+--
+
+```bash
+CID=$(docker ps -qf "name=worker-972504476645")
+
+docker exec -it $CID sh -c 'curl -sm10 -o /dev/null -w "http=%{http_code} time=%{time_total}s\n" \
+  -X POST http://scenario_data-spine:8000/workers/heartbeat \
+  -H "Content-Type: application/json" \
+  -d "{\"phone_id\":\"3beff8fa-4dc6-4a03-b70f-17a47fe09529\",\"status\":\"online\"}"'
+
+
+```
+
+
 צור את הפרוביז'נר תחילה
 
 
@@ -20,6 +47,10 @@ docker service scale scenario_provisioner=1
 ```
 
 משמשת ב־Docker Swarm כדי לשנות את מספר ה־replicas של השירות scenario_provisioner.
+
+
+
+
 
 
 

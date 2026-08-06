@@ -1,5 +1,22 @@
 
 
+Restart ה‑task
+
+הדרך היחידה לרוקן את הבאפר היא להפעיל task חדש. --force מפעיל מחדש והלוגים מתחילים כמעט מאפס:
+
+```bash
+docker service update --force scenario_data-spine
+
+```
+
+
+```bash
+CID=$(docker ps -qf "name=worker-972504476645")
+echo "CID=$CID"
+docker exec -it $CID sh -c "curl -sm5 http://localhost:9000/version"
+
+```
+
 ```bash
 
 docker exec -it $CID sh -c "curl -sm5 http://scenario_data-spine:8000/openapi.json" | python3 -m json.tool 2>/dev/null | grep -A1 '"/' | grep '"/'

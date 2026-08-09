@@ -1,0 +1,88 @@
+flowchart TD
+    WA["הודעה ב-WhatsApp"] --> HA["HostAgent → messages"]
+    HA --> IN["POST /incoming"]
+
+    IN --> LOAD{"_load_message<br/>4 מזהים תואמים?"}
+    LOAD -->|לא| E404["404 Message not found"]
+    LOAD -->|כן| DIR{"direction"}
+
+    %% ── outgoing ──────────────────────────────────────────
+    DIR -->|outgoing| MARK{"🏁🏁 ?"}
+    MARK -->|כן| LAST["update calls<br/>last_send_time · last_whatsapp_id"]
+    MARK -->|לא| LINK["_complete_leaf_message_links"]
+    LAST --> D1["200"]
+    LINK --> D1
+
+    %% ── incoming ──────────────────────────────────────────
+    DIR -->|incoming| NORM["_normalize_message<br/>בונה first_message"]
+    NORM --> ACT{"_get_active_call<br/>יש running?"}
+
+    ACT -->|כן| ENTRY["send_to_worker<br/>entryMessage<br/><b>חלק משיחה קיימת</b>"]
+    ACT -->|לא| RPC
+    ENTRY --> RPC
+
+    %% ── RPC המאוחד ────────────────────────────────────────
+    RPC["<b>spine_ensure_call</b><br/>scenario_id = null → מצב trigger"]
+    SCHED["Scheduler / API / Play"] --> ENS["POST /calls/ensure"]
+    ENS --> RPC2["<b>spine_ensure_call</b><br/>scenario_id = uuid"]
+
+    RPC --> TAG
+    RPC2 --> TAG
+
+    TAG{"contact.tag = 'active'?"}
+    TAG -->|לא| DENY0["denied<br/>CONTACT_NOT_ACTIVE"]
+    TAG -->|כן| LOCK["🔒 advisory lock<br/>phone_id + contact_id"]
+
+    LOCK --> OPEN{"יש call פתוח?<br/>running או queued"}
+
+    %% ── מדיניות מול call פתוח ─────────────────────────────
+    OPEN -->|כן| SRC{"source?<br/>scheduler נבדק ראשון"}
+
+    SRC -->|trigger| DENY1["<b>denied · בלי שורה</b><br/>TRIGGER_DENIED_ACTIVE_CALL"]
+
+    SRC -->|"scheduler / api / manual"| WIPE["ריקון התור<br/>כל queued → aborted<br/>PREEMPTED_BY_SOURCE"]
+    WIPE --> ABRT["שורת aborted לתיעוד<br/>SCHEDULER_INSTANCE_EXISTS<br/>או ACTIVE_CALL_EXISTS<br/><i>בלי started_at · בלי SLA</i>"]
+
+    DENY1 --> KEEP(["ה-running ממשיך<br/>עד summary או expired"])
+    ABRT --> KEEP
+
+    %% ── יצירה ─────────────────────────────────────────────
+    OPEN -->|לא| LOOP["לולאה לפי priority<br/>trigger: כל התרחישים<br/>בודד: שורה אחת"]
+
+    LOOP --> R1["#1 → <b>running</b><br/>started_at + expected_end"]
+    LOOP --> QN["#2..N → <b>queued</b><br/>בלי SLA"]
+
+    R1 --> INIT["send_to_worker<br/>init + first_message"]
+    QN -.->|"אותו event_id<br/>אותו first_message"| R1
+
+    INIT --> RUN(["Worker מריץ תרחיש"])
+    RUN --> FB["/events · /leaves · /leaves/status"]
+    FB --> RUN
+
+    %% ── סיום ──────────────────────────────────────────────
+    RUN --> SUM["POST /calls/{id}/summary"]
+    SUM --> COMP["complete_call →<br/><b>spine_complete_call</b> 🔒"]
+
+    RUN -.->|"Worker קרס<br/>אין summary"| STUCK["running תקוע"]
+    SWP["Scheduler → POST /calls/sweep<br/>expected_end &lt; now"] -.-> STUCK
+    STUCK -.->|"expired"| COMP
+
+    COMP --> NEXT{"יש queued?"}
+    NEXT -->|כן| PROMO["הבא לפי priority → running<br/>started_at + expected_end"]
+    PROMO --> INIT2["init עם ה-first_message<br/>ששמור על השורה שלו"]
+    INIT2 --> RUN
+
+    NEXT -->|לא| FREE(["קונטקט פנוי<br/>ההודעה הבאה תפתח<br/>באטץ' עם event_id חדש"])
+
+    COMP --> ENDM["🏁🏁 חותמת סיום"]
+    ENDM -.->|"חוזרת כ-outgoing"| IN
+
+    classDef deny fill:#fde2e2,stroke:#c0392b,color:#7b241c
+    classDef ok fill:#e2f6e6,stroke:#27ae60,color:#145a32
+    classDef db fill:#e8eefc,stroke:#2c5aa0,color:#1b3a6b
+    classDef warn fill:#fdf1dc,stroke:#c87f0a,color:#7a4b06
+
+    class DENY0,DENY1,ABRT,WIPE,E404 deny
+    class R1,INIT,INIT2,PROMO,ENTRY,FREE ok
+    class RPC,RPC2,COMP,LOCK db
+    class SWP,STUCK,KEEP,QN warn

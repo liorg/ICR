@@ -9,7 +9,6 @@ volumes:
   registry_data:
 
 services:
-
   registry:
     image: registry:2
     ports:
@@ -22,12 +21,21 @@ services:
           - node.role == manager
 
   data-spine:
-    image: ${REGISTRY_HOST}:5000/data-spine:latest
+    # IMAGE_TAG מגיע מ-deploy.sh (SHA ב-CI, timestamp בהרצה ידנית).
+    # ברירת המחדל latest נועדה ל-docker stack deploy ידני בלי הסקריפט.
+    #
+    # למה זה חשוב: תג נייד כמו latest גורם ל-Swarm לחשוב שהשירות כבר
+    # מעודכן, ואז הפריסה "מצליחה" בזמן שרץ הקוד הישן. תג ייחודי הופך
+    # כל פריסה לשינוי מפורש, ו-docker stack services מראה מה באמת רץ.
+    image: ${REGISTRY_HOST}:5000/data-spine:${IMAGE_TAG:-latest}
     networks:
       - spine-net
     environment:
       SUPABASE_URL: "${SUPABASE_URL}"
       SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
+
+      # מוחזר ב-GET /version. נצרב ל-image ב-build, וגם כאן כגיבוי.
+      BUILD_TAG: "${IMAGE_TAG:-unknown}"
 
       # ── Workers → Spine (בתוך ה-overlay) ─────────────────────────────
       SPINE_SELF_URL: "http://scenario_data-spine:8000"
@@ -59,7 +67,7 @@ services:
         order: start-first
 
   provisioner:
-    image: ${REGISTRY_HOST}:5000/provisioner:latest
+    image: ${REGISTRY_HOST}:5000/provisioner:${IMAGE_TAG:-latest}
     networks:
       - spine-net
     environment:
@@ -76,7 +84,7 @@ services:
           - node.role == manager
 
   scheduler:
-    image: ${REGISTRY_HOST}:5000/scheduler:latest
+    image: ${REGISTRY_HOST}:5000/scheduler:${IMAGE_TAG:-latest}
     networks:
       - spine-net
     environment:
@@ -84,3 +92,22 @@ services:
       SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
       SPINE_URL: "http://scenario_data-spine:8000"
       CHECK_INTERVAL_SECONDS: "30"
+
+      # ── sweep: סגירת calls תקועים ────────────────────────────────────
+      #
+      # ה-Worker הוא היחיד שסוגר call בזרימה תקינה. אם הוא קרס,
+      # ה-call נשאר running לנצח והקונטקט חסום: הודעות נכנסות מנותבות
+      # ל-Worker שלא קיים, וכל trigger נדחה.
+      #
+      # ה-sweep סוגר לפי expected_end דרך spine_complete_call, כך
+      # שגם התור מתקדם. חייב לפנות ל-Spine ולא ל-DB ישירות.
+      SPINE_SWEEP_PATH: "${SPINE_SWEEP_PATH:-/api/calls/sweep}"
+      SWEEP_STATUS: "${SWEEP_STATUS:-expired}"
+      SWEEP_LIMIT: "${SWEEP_LIMIT:-50}"
+      SWEEP_TIMEOUT_SECONDS: "${SWEEP_TIMEOUT_SECONDS:-60}"
+      SLA_CHECK_SECONDS: "${SLA_CHECK_SECONDS:-60}"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s

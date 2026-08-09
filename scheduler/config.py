@@ -1,7 +1,5 @@
 # scheduler/config.py
-
 import os
-
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -41,4 +39,35 @@ MAX_SCHEDULES_PER_POLL = max(
 SLA_CHECK_SECONDS = max(
     int(os.getenv("SLA_CHECK_SECONDS", "60")),
     10,
+)
+
+
+# ── sweep ─────────────────────────────────────────────────────────────
+#
+# ה-Scheduler פונה ל-Spine ולא ל-DB ישירות: הסגירה חייבת לעבור דרך
+# spine_complete_call, שמקדם את ה-queued הבא ושולח לו init. UPDATE
+# ישיר היה משאיר שורות queued יתומות והקונטקט נשאר חסום.
+
+SPINE_SWEEP_PATH = os.getenv(
+    "SPINE_SWEEP_PATH",
+    "/api/calls/sweep",
+)
+
+# חייב להיות ערך שקיים ב-FINAL_CALL_STATUSES בצד ה-Spine.
+SWEEP_STATUS = os.getenv(
+    "SWEEP_STATUS",
+    "expired",
+)
+
+# תקרת calls לסבב אחד. ה-Spine חוסם ב-200 בכל מקרה.
+SWEEP_LIMIT = max(
+    int(os.getenv("SWEEP_LIMIT", "50")),
+    1,
+)
+
+# כל call שנסגר גורר קריאת RPC ואולי init ל-Worker,
+# ולכן ה-timeout נדיב יחסית.
+SWEEP_TIMEOUT_SECONDS = max(
+    float(os.getenv("SWEEP_TIMEOUT_SECONDS", "60")),
+    5.0,
 )

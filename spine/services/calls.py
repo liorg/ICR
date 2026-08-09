@@ -68,6 +68,7 @@ class CallResult:
     call_id:     Optional[str]   = None
     phone_id:    Optional[str]   = None
     worker_payload: Optional[dict] = None   # None → אין מה לשלוח ל-Worker
+    event_id:    Optional[str]   = None     # GUID משותף לכל הבאטץ'
 
     @property
     def needs_worker(self) -> bool:
@@ -325,23 +326,30 @@ async def ensure_call(
     db,
     phone_id: str,
     contact_id: str,
-    scenario_id: str,
+    scenario_id: Optional[str] = None,
     priority: Optional[int] = None,
     source: str = "trigger",
-    first_message: Optional[dict] = None,
     schedule_id: Optional[str] = None,
+    first_message: Optional[dict] = None,
 ) -> CallResult:
     """
-    קריאת DB אחת בלבד.
+    עוטף את spine_ensure_call. שני מצבי הפעלה, אותו תהליך עסקי:
 
-    spine_ensure_call אחראי על:
-      - אימות Contact לפי phone_id + contact_id
-      - בדיקת Contact פעיל
-      - אימות Scenario לפי phone_id + scenario_id
-      - בדיקת Scenario פעיל
-      - שליפת config + priority
-      - שמירת scenario_snapshot
-      - יצירת running / queued / blocked תחת lock אטומי
+      scenario_id = None → מצב trigger. ה-RPC בוחר בעצמו את כל תרחישי
+                           ה-trigger הפעילים; הראשון לפי priority running,
+                           השאר queued. source נכפה ל-'trigger'.
+
+      scenario_id = uuid → תרחיש בודד (scheduler / api / manual).
+
+    מול call פתוח (running או queued):
+
+      trigger                  → 409 denied. לא נרשמת שורה.
+      scheduler/api/manual     → 409 aborted, ולא נכנס לתור. בנוסף
+                                 מרוקן את התור: כל ה-queued הופכים
+                                 ל-aborted / PREEMPTED_BY_<SOURCE>.
+
+    ה-running לא מופסק בשום מקרה — עד summary או עד expired.
+    SLA מתחיל רק במעבר ל-running, לא בכניסה לתור.
     """
 
     res = await _rpc(
@@ -353,84 +361,67 @@ async def ensure_call(
             "p_priority": priority,
             "p_source": source,
             "p_schedule_id": schedule_id,
+            "p_first_message": first_message,
         },
     )
 
     if not isinstance(res, dict):
-        res = {
-            "status": "error",
-            "code": "INVALID_RPC_RESPONSE",
-            "message": "spine_ensure_call returned a non-object response",
-            "raw": res,
-        }
+        return CallResult(
+            500,
+            "INVALID_RPC_RESPONSE",
+            {
+                "status": "error",
+                "code": "INVALID_RPC_RESPONSE",
+                "message": "spine_ensure_call returned a non-object response",
+                "raw": res,
+            },
+        )
 
-    code = res.get("code", "UNKNOWN")
-    call_status = res.get("status")
-    call_id = res.get("call_id")
+    code     = res.get("code", "UNKNOWN")
+    status   = res.get("status")
+    call_id  = res.get("call_id")
+    event_id = res.get("event_id")
 
     log.info(
-        "[ENSURE] %s | phone=%s contact=%s scenario=%s source=%s call=%s status=%s",
-        code,
-        phone_id,
-        contact_id,
-        scenario_id,
-        source,
-        call_id,
-        call_status,
+        "[ENSURE] %s | phone=%s contact=%s scenario=%s source=%s "
+        "status=%s call=%s event=%s",
+        code, phone_id, contact_id, scenario_id or "*", source,
+        status, call_id, event_id,
     )
 
-    if code == "CONTACT_NOT_FOUND":
+    if code in ("CONTACT_NOT_FOUND", "SCENARIO_NOT_FOUND_OR_INACTIVE"):
         return CallResult(404, code, res)
 
-    if code == "CONTACT_NOT_ACTIVE":
-        return CallResult(409, code, res)
+    if status == "denied":
+        # לא נרשמה שורה. זה מצב תקין, לא שגיאה.
+        return CallResult(409, code, res, res.get("active_call_id"), phone_id)
 
-    if code == "SCENARIO_NOT_FOUND_OR_INACTIVE":
-        return CallResult(404, code, res)
-
-    if code == "INVALID_RPC_RESPONSE" or call_status == "error":
-        return CallResult(500, code, res)
-
-    if call_status == "blocked":
-        return CallResult(
-            409,
-            code,
-            res,
-            call_id,
-            phone_id,
+    if status == "aborted":
+        # נרשמה שורה לתיעוד, אבל שום דבר לא רץ ולא ירוץ.
+        log.info(
+            "[ENSURE] aborted | call=%s source=%s reason=%s cancelled_queued=%s",
+            call_id, source, res.get("status_reason"), res.get("cancelled_queued", 0),
         )
+        return CallResult(409, code, res, call_id, phone_id, event_id=event_id)
 
-    if call_status == "queued":
-        return CallResult(
-            202,
-            code,
-            res,
-            call_id,
-            phone_id,
-        )
+    if status == "empty":
+        return CallResult(200, code, res, None, phone_id)
 
-    if call_status != "running" or not call_id:
+    if status != "running" or not call_id:
         body = dict(res)
         body["code"] = "UNEXPECTED_ENSURE_RESULT"
         body["message"] = (
-            "spine_ensure_call did not return running, queued or blocked"
+            "spine_ensure_call did not return running, denied, aborted or empty"
         )
-
-        return CallResult(
-            500,
-            "UNEXPECTED_ENSURE_RESULT",
-            body,
-        )
+        return CallResult(500, "UNEXPECTED_ENSURE_RESULT", body)
 
     contact = {
-        "id": res.get("contact_id"),
+        "id":     res.get("contact_id"),
         "number": res.get("contact_number") or "",
-        "lid": res.get("contact_lid"),
-        "name": res.get("contact_name") or "",
-        "tag": "active",
+        "lid":    res.get("contact_lid"),
+        "name":   res.get("contact_name") or "",
+        "tag":    "active",
     }
-
-    snapshot = res.get("scenario_json") or {}
 
     return CallResult(
         201,
@@ -442,11 +433,11 @@ async def ensure_call(
             call_id,
             contact,
             res.get("scenario_id") or scenario_id,
-            snapshot,
+            res.get("scenario_json") or {},
             first_message,
         ),
+        event_id=event_id,
     )
-
 
 # ══════════════════════════════════════════════════════════════════════
 # complete — סוגר ומקדם את הבא בתור
@@ -469,8 +460,10 @@ async def complete_call(db, call_id: str, status: str = "completed") -> CallResu
         return CallResult(200, code, res, call_id)
 
     # ── הבא בתור קודם ל-running → הקורא ישלח לו init ─────────────────
+    # first_message נשמר על השורה בזמן היצירה — ה-call המקודם מקבל
+    # את אותה הודעה נכנסת שיצרה אותו, לא None.
     row = db.table("calls") \
-        .select("id, phone_id, contact_id, scenario_id, scenario_snapshot") \
+        .select("id, phone_id, contact_id, scenario_id, scenario_snapshot, first_message") \
         .eq("id", nxt).maybe_single().execute().data
     if not row:
         log.error("[COMPLETE] promoted call %s not found", nxt)
@@ -482,5 +475,6 @@ async def complete_call(db, call_id: str, status: str = "completed") -> CallResu
     return CallResult(
         200, code, res, call_id, row["phone_id"],
         worker_payload=init_payload(row["id"], contact, row["scenario_id"],
-                                    row.get("scenario_snapshot"), None),
+                                    row.get("scenario_snapshot"),
+                                    row.get("first_message")),
     )

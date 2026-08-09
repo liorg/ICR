@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -10,16 +11,25 @@ if [ -f .env ]; then
 fi
 
 REGISTRY="${REGISTRY_HOST:-10.186.0.3}"
-TAG="${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}"
 STACK_NAME="${STACK_NAME:-scenario}"
+
+# ה-CI מעביר BUILD_TAG=${{ github.sha }}. בהרצה ידנית נופלים ל-timestamp,
+# כדי שהסקריפט יעבוד גם בלי משתנה סביבה.
+#
+# חשוב שהתג ישתנה בכל פריסה: Swarm לא מושך image מחדש כשהתג זהה, ואז
+# service update מריץ בדיוק את הקוד הישן.
+TAG="${BUILD_TAG:-$(date +%Y%m%d%H%M%S)}"
 
 echo "================================"
 echo "Registry: ${REGISTRY}:5000"
 echo "Tag:      ${TAG}"
 echo "================================"
 
+# --build-arg רק ל-spine: רק ה-Dockerfile שלו מגדיר ARG BUILD_TAG
+# (בשביל GET /version). העברה לאחרים מייצרת אזהרת "not consumed".
 echo "Building spine..."
 docker build \
+  --build-arg BUILD_TAG="${TAG}" \
   -t "${REGISTRY}:5000/data-spine:${TAG}" \
   -t "${REGISTRY}:5000/data-spine:latest" \
   ./spine/
@@ -62,3 +72,11 @@ echo "Deployed — tag: ${TAG}"
 echo "================================"
 
 docker stack services "${STACK_NAME}"
+
+# אימות שהקוד שרץ הוא הקוד שנפרס. REPLICAS ב-0/1 למעלה מספיק כדי
+# לדעת שמשהו קורס, אבל /version מאשר שגם הקוד עצמו התחלף.
+echo ""
+echo "Spine version:"
+curl -sf --max-time 5 "http://${REGISTRY}:8001/version" || \
+    echo "  (spine not responding yet — check: docker service logs ${STACK_NAME}_data-spine)"
+echo ""

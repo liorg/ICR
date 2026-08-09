@@ -2,7 +2,7 @@
 Dispatch — נקודת הכניסה של Scheduler ו-API ישיר.
 הלוגיקה עצמה ב-services/calls.py. כאן רק HTTP.
 
-    POST /api/calls/ensure          201 CREATED | 202 QUEUED | 409 BLOCKED/ABORTED
+    POST /api/calls/ensure          201 CREATED | 409 BLOCKED/ABORTED
     POST /api/calls/{id}/complete
     POST /api/calls/sweep           סוגר calls תקועים לפי expected_end
     POST /api/dispatch/message
@@ -21,11 +21,9 @@ router = APIRouter(tags=["dispatch"])
 log = logging.getLogger("spine.dispatch")
 
 
-# מול call פתוח:
-#   trigger   → 409 blocked, בלי שורה
-#   scheduler → 202 queued (ומבטל triggers ממתינים), או
-#               409 aborted אם כבר קיים instance של scheduler
-#   api       → 409 aborted תמיד
+# מול call פתוח (running או queued):
+#   trigger                  → 409 blocked, בלי שורה
+#   scheduler / api / manual → 409 aborted, ומרוקן את התור
 # ה-running לא מופסק בשום מקרה.
 class EnsureReq(BaseModel):
     phone_id:      str
@@ -61,16 +59,19 @@ class SweepReq(BaseModel):
 @router.post("/calls/ensure")
 async def ensure(req: EnsureReq, response: Response):
     db  = get_supabase()
+    # בשמות ולא במיקום: הסדר בחתימה הוא schedule_id ואז first_message,
+    # וקריאה מיקומית שלחה את schedule_id לתוך first_message — הערך נשמר
+    # בעמודה כמחרוזת, וה-Worker דחה את ה-init ב-400.
     res = await ensure_call(
-            db,
-            phone_id=req.phone_id,
-            contact_id=req.contact_id,
-            scenario_id=req.scenario_id,
-            priority=req.priority,
-            source=req.source,
-            schedule_id=req.schedule_id,
-            first_message=req.first_message,
-        )
+        db,
+        phone_id=req.phone_id,
+        contact_id=req.contact_id,
+        scenario_id=req.scenario_id,
+        priority=req.priority,
+        source=req.source,
+        schedule_id=req.schedule_id,
+        first_message=req.first_message,
+    )
 
     if res.http_status in (404,):
         raise HTTPException(404, res.code)

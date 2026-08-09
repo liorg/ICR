@@ -19,11 +19,15 @@ Worker → Spine.
 Leaves נשלחים בזמן אמת דרך POST /leaves ומתעדכנים דרך PATCH /leaves/status.
 
 ה-Summary הוא אות הסיום של התרחיש:
-הוא שומר נתוני סיכום וסוגר את ה-call בלבד.
+הוא שומר נתוני סיכום, סוגר את ה-call **ומקדם את הבא בתור**.
 
-הוא אינו מקדם queued ל-running ואינו שולח init ל-Worker.
-הפעלת calls מתבצעת רק דרך ensure_call, שנקרא מ-API, Scheduler או Trigger.
-ה-Job החיצוני אחראי לטיפול בתור.
+הסגירה עוברת דרך spine_complete_call ולא ב-UPDATE ישיר. אין Job חיצוני
+שמטפל בתור, ולכן זו הנקודה היחידה שבה queued הופך ל-running אחרי סיום
+תקין. בלעדיה שורות queued נשארות מתות והקונטקט נחסם לצמיתות:
+בלי running הודעה נכנסת לא מנותבת, ועם queued כל trigger נדחה.
+
+calls תקועים שלא מגיע להם Summary נסגרים ע"י POST /calls/sweep לפי
+expected_end.
 """
 
 import logging
@@ -34,7 +38,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from dependencies import get_supabase
-from services.calls import send_call_end_marker
+from services.calls import complete_call, send_call_end_marker, send_to_worker
 
 
 router = APIRouter(tags=["worker-events"])
@@ -395,11 +399,9 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
 
     1. אימות שזהו ה-call הנכון.
     2. שמירת נתוני הסיכום על ה-call.
-    3. סגירת ה-call בלבד.
+    3. סגירת ה-call וקידום ה-queued הבא, דרך spine_complete_call.
 
     הוא אינו שומר או מעדכן Leaves.
-    הוא אינו מקדם תור ואינו שולח דבר ל-Worker.
-    מי שמפעיל call הוא ensure_call דרך API, Scheduler או Trigger.
     """
 
     # אותו call_id חייב להופיע ב-URL וב-body.
@@ -495,32 +497,21 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
             summary.contact_id,
         )
 
-    # ── סגירת ה-call בלבד ─────────────────────────────────────────────
+    # ── סגירה + קידום התור ────────────────────────────────────────────
     #
-    # אין כאן complete_call RPC:
-    #   • לא בוחרים queued הבא
-    #   • לא משנים queued ל-running
-    #   • לא שולחים init ל-Worker
-    #
-    # ה-Job החיצוני מטפל בתור, וכל הפעלה עוברת דרך ensure_call.
-    close_patch: dict[str, Any] = {
-        "status": summary.status,
-        "ended_at": (
-            summary.finished_at.isoformat()
-            if summary.finished_at is not None
-            else _now()
-        ),
-    }
+    # spine_complete_call סוגר את ה-call ומקדם את ה-queued הבא לפי
+    # priority תחת אותו lock. זו הנקודה היחידה שבה זה קורה בסיום תקין.
+    close = await complete_call(db, call_id, summary.status)
+    code = close.code
+    next_call_id = close.body.get("next_call_id")
 
-    close_result = (
-        db.table("calls")
-        .update(close_patch)
-        .eq("id", call_id)
-        .eq("status", "running")
-        .execute()
-    )
+    if code == "CALL_NOT_FOUND":
+        raise HTTPException(
+            status_code=404,
+            detail="Call not found",
+        )
 
-    if not close_result.data:
+    if code == "CALL_NOT_RUNNING":
         existing = (
             db.table("calls")
             .select("id, status")
@@ -530,13 +521,7 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
             .data
         )
 
-        if not existing:
-            raise HTTPException(
-                status_code=404,
-                detail="Call not found",
-            )
-
-        current_status = existing[0].get("status")
+        current_status = existing[0].get("status") if existing else None
 
         # Summary כפול הוא idempotent: אם ה-call כבר סופי מחזירים 200.
         if current_status in FINAL_CALL_STATUSES:
@@ -546,8 +531,33 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
                 status_code=409,
                 detail=f"Call is not running; current status: {current_status}",
             )
-    else:
-        code = "CALL_CLOSED"
+
+    # spine_complete_call כותב ended_at = now(). כשה-Worker דיווח זמן
+    # סיום מדויק, הוא גובר.
+    elif summary.finished_at is not None:
+        db.table("calls").update(
+            {"ended_at": summary.finished_at.isoformat()}
+        ).eq("id", call_id).execute()
+
+    # ── init ל-call שקודם ─────────────────────────────────────────────
+    #
+    # כשל בשליחה לא פותח מחדש את ה-call: ה-call המקודם כבר running
+    # ו-expected_end שלו ייתפס ע"י ה-sweeper.
+    promoted_delivered = False
+
+    if close.needs_worker:
+        promoted_delivered = await send_to_worker(
+            db,
+            close.phone_id or call_phone_id,
+            close.worker_payload,
+        )
+
+        if not promoted_delivered:
+            log.error(
+                "[SUMMARY] promoted call not delivered | call=%s next=%s",
+                call_id,
+                next_call_id,
+            )
 
     # חותמת הסיום נשלחת תמיד, ללא קשר לסיבת הסיום.
     # כשל בשליחה אינו פותח מחדש את ה-call ואינו מפעיל Worker.
@@ -572,11 +582,21 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
         code,
     )
 
+    if next_call_id:
+        log.info(
+            "[SUMMARY] queue promoted | call=%s next=%s delivered=%s",
+            call_id,
+            next_call_id,
+            promoted_delivered,
+        )
+
     return {
         "ok": True,
         "code": code,
         "call_id": call_id,
         "status": summary.status,
+        "next_call_id": next_call_id,
+        "next_call_delivered": promoted_delivered,
         "end_marker_sent": marker_result.get("ok", False),
         "end_marker_code": marker_result.get("code"),
     }

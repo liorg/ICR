@@ -2,11 +2,13 @@
 Dispatch — נקודת הכניסה של Scheduler ו-API ישיר.
 הלוגיקה עצמה ב-services/calls.py. כאן רק HTTP.
 
-    POST /api/calls/ensure          201 CREATED | 202 QUEUED | 409 BLOCKED
+    POST /api/calls/ensure          201 CREATED | 202 QUEUED | 409 BLOCKED/ABORTED
     POST /api/calls/{id}/complete
+    POST /api/calls/sweep           סוגר calls תקועים לפי expected_end
     POST /api/dispatch/message
 """
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Response
@@ -19,6 +21,12 @@ router = APIRouter(tags=["dispatch"])
 log = logging.getLogger("spine.dispatch")
 
 
+# מול call פתוח:
+#   trigger   → 409 blocked, בלי שורה
+#   scheduler → 202 queued (ומבטל triggers ממתינים), או
+#               409 aborted אם כבר קיים instance של scheduler
+#   api       → 409 aborted תמיד
+# ה-running לא מופסק בשום מקרה.
 class EnsureReq(BaseModel):
     phone_id:      str
     contact_id:    str
@@ -41,6 +49,12 @@ class ForwardReq(BaseModel):
 
 class CompleteReq(BaseModel):
     status: str = "completed"
+
+
+class SweepReq(BaseModel):
+    # ברירת מחדל: expired. אפשר timeout אם מבדילים בדוחות.
+    status: str = "expired"
+    limit:  int = 50
 
 
 # ── ensure ────────────────────────────────────────────────────────────
@@ -74,6 +88,71 @@ async def complete(call_id: str, req: CompleteReq, response: Response):
     response.status_code = res.http_status
     return res.body
 
+
+
+# ── sweep ─────────────────────────────────────────────────────────────
+@router.post("/calls/sweep")
+async def sweep(req: SweepReq):
+    """
+    סוגר calls שנתקעו ב-running ולא הגיע להם Summary.
+
+    למה זה חייב להתקיים: ה-Worker הוא היחיד שסוגר call (דרך
+    /calls/{id}/summary). אם הוא קרס, נהרג או איבד קשר — ה-call נשאר
+    running לנצח, וכל הודעה נכנסת מהקונטקט הזה מנותבת ל-Worker שלא
+    קיים. גם trigger חדש נדחה. הקונטקט חסום.
+
+    expected_end כבר מחושב בכל יצירה וקידום (estimated_time + buffer),
+    ופשוט לא נקרא ע"י אף אחד. זה הקורא.
+
+    הסגירה עוברת דרך complete_call, כך שגם כאן ה-queued הבא מקודם
+    ומקבל init — בדיוק כמו בסיום תקין.
+
+    ה-Scheduler קורא לזה מחזורית. Spine מגיב, לא יוזם.
+    """
+    db  = get_supabase()
+    now = datetime.now(timezone.utc).isoformat()
+
+    stuck = (
+        db.table("calls")
+        .select("id, phone_id, contact_id, expected_end")
+        .eq("status", "running")
+        .lt("expected_end", now)
+        .order("expected_end")
+        .limit(max(1, min(req.limit, 200)))
+        .execute()
+        .data
+        or []
+    )
+
+    if not stuck:
+        return {"ok": True, "swept": 0, "calls": []}
+
+    results = []
+
+    for row in stuck:
+        res = await complete_call(db, row["id"], req.status)
+
+        delivered = False
+        if res.needs_worker:
+            delivered = await send_to_worker(db, res.phone_id, res.worker_payload)
+
+        log.warning(
+            "[SWEEP] closed stuck call | call=%s contact=%s expected_end=%s "
+            "code=%s next=%s delivered=%s",
+            row["id"], row.get("contact_id"), row.get("expected_end"),
+            res.code, res.body.get("next_call_id"), delivered,
+        )
+
+        results.append({
+            "call_id":      row["id"],
+            "contact_id":   row.get("contact_id"),
+            "expected_end": row.get("expected_end"),
+            "code":         res.code,
+            "next_call_id": res.body.get("next_call_id"),
+            "delivered":    delivered,
+        })
+
+    return {"ok": True, "swept": len(results), "calls": results}
 
 
 # ── forward incoming message ─────────────────────────────────────────

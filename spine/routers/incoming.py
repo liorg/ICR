@@ -22,6 +22,15 @@ whatsAppMessageId:
     incoming:
         Spine מנתב את ההודעה ל-Worker.
         ה-Worker מטפל בהתאמת ה-leaf ובסטטוס העסקי.
+
+מדיניות Trigger:
+    יש call פתוח (running/queued)  → denied. לא נוצר call, אין init ל-Worker.
+                                      ההודעה עדיין מנותבת ל-call הרץ כ-entryMessage.
+    אין call פתוח                  → כל תרחישי ה-trigger הפעילים נוצרים יחד:
+                                      הראשון לפי priority = running, השאר = queued.
+
+ההחלטה כולה ב-spine_ensure_call (עם scenario_id=None), תחת lock אחד.
+כל ה-calls שנוצרו מאותה הודעה חולקים first_message ו-event_id זהים.
 """
 
 import json
@@ -244,56 +253,63 @@ async def handle_incoming(body: IncomingDispatch):
             ),
         )
 
-    scenarios = _load_trigger_scenarios(
+    # ── Trigger ────────────────────────────────────────────────────────
+    #
+    # ה-DB מחליט, לא Spine:
+    #   יש call פתוח  → denied. לא נוצר call, לא נשלח init ל-Worker.
+    #   אין call פתוח → כל תרחישי ה-trigger נוצרים יחד; הראשון לפי
+    #                   priority running, השאר queued.
+    #
+    # scenario_id=None → מצב trigger: ה-RPC בוחר בעצמו את כל תרחישי
+    # ה-trigger הפעילים. קריאה אחת תחת lock אחד — אין שאילתת scenarios
+    # כאן, אין לולאה, ואין מצב ביניים שבו חלק נוצרו וחלק לא.
+    trigger = await ensure_call(
         db,
         phone_id=body.phone_id,
+        contact_id=body.contact_id,
+        scenario_id=None,
+        source="trigger",
+        first_message=first_message,
     )
 
-    results: list[dict[str, Any]] = []
+    delivered = False
 
-    for scenario in scenarios:
-        result = await ensure_call(
+    if trigger.needs_worker:
+        delivered = await send_to_worker(
             db,
-            phone_id=body.phone_id,
-            contact_id=body.contact_id,
-            scenario_id=scenario["id"],
-            priority=scenario.get("priority"),
-            source="trigger",
-            first_message=first_message,
+            trigger.phone_id or body.phone_id,
+            trigger.worker_payload,
         )
 
-        delivered = False
+        trigger.with_delivery(delivered)
 
-        if result.needs_worker:
-            delivered = await send_to_worker(
-                db,
-                result.phone_id or body.phone_id,
-                result.worker_payload,
-            )
-
-            result.with_delivery(delivered)
-
-        results.append(
-            {
-                "scenario_id": scenario["id"],
-                "priority": scenario.get("priority"),
-                "call_id": result.call_id,
-                "code": result.code,
-                "status": result.body.get("status"),
-                "http_status": result.http_status,
-                "delivered": delivered,
-            }
+    if trigger.http_status == 409:
+        log.info(
+            "[TRIGGER] denied | phone=%s contact=%s active_call=%s reason=%s",
+            body.phone_id,
+            body.contact_id,
+            trigger.call_id,
+            trigger.code,
         )
+
+    running_call_id = trigger.call_id if trigger.http_status == 201 else None
 
     return {
         "ok": True,
         "incoming": True,
         "message_id": body.message_id,
         "whatsapp_message_id": body.whatsapp_message_id,
+
         "active_call_id": active_call["id"] if active_call else None,
         "routed_to_active": delivered_to_active,
-        "triggered": len(results),
-        "calls": results,
+
+        "event_id": trigger.event_id,
+        "trigger_status": trigger.body.get("status"),
+        "trigger_code": trigger.code,
+        "denied": trigger.http_status == 409,
+
+        "call_id": running_call_id,
+        "delivered": delivered,
     }
 
 
@@ -355,24 +371,6 @@ def _get_active_call(
     )
 
     return result[0] if result else None
-
-
-def _load_trigger_scenarios(
-    db,
-    phone_id: str,
-) -> list[dict]:
-    return (
-        db.table("scenarios")
-        .select("id, priority")
-        .eq("phone_id", phone_id)
-        .eq("status", "active")
-        .eq("event_type", "trigger")
-        .order("priority")
-        .order("created_at")
-        .execute()
-        .data
-        or []
-    )
 
 
 async def _complete_leaf_message_links(

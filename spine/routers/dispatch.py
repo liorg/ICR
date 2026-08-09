@@ -61,9 +61,16 @@ class SweepReq(BaseModel):
 @router.post("/calls/ensure")
 async def ensure(req: EnsureReq, response: Response):
     db  = get_supabase()
-    res = await ensure_call(db, req.phone_id, req.contact_id, req.scenario_id,
-                            req.priority, req.source, req.first_message,
-                            req.schedule_id)
+    res = await ensure_call(
+            db,
+            phone_id=req.phone_id,
+            contact_id=req.contact_id,
+            scenario_id=req.scenario_id,
+            priority=req.priority,
+            source=req.source,
+            schedule_id=req.schedule_id,
+            first_message=req.first_message,
+        )
 
     if res.http_status in (404,):
         raise HTTPException(404, res.code)

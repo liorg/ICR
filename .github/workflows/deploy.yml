@@ -1,10 +1,11 @@
 name: Deploy ICR
+
 on:
   workflow_dispatch:
   push:
     branches:
       - main
-  
+
 concurrency:
   group: scenario-deploy
   cancel-in-progress: false
@@ -25,6 +26,9 @@ jobs:
           source: ".,!.git"
           target: "/opt/ICR"
           overwrite: true
+          # ה-SCP נפל בעבר על i/o timeout בפורט 22.
+          timeout: 60s
+          command_timeout: 15m
 
       - name: Build and deploy
         uses: appleboy/ssh-action@v1
@@ -33,7 +37,15 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_KEY }}
           command_timeout: 20m
+          # BUILD_TAG ייחודי לכל commit.
+          #
+          # תג latest גורם ל-Swarm לא למשוך image חדש — service update
+          # מריץ את הישן וזה נראה כאילו הקוד לא השתנה. תג לפי SHA מבטיח
+          # שכל פריסה היא image אחר, ו-/version מחזיר בדיוק מה רץ.
+          envs: BUILD_TAG
           script: |
             cd /opt/ICR
             chmod +x deploy.sh
-            ./deploy.sh
+            BUILD_TAG="${BUILD_TAG}" ./deploy.sh
+        env:
+          BUILD_TAG: ${{ github.sha }}

@@ -11,6 +11,10 @@
 -- 2. קידום התור הוחזר. spine_ensure_call יוצר שורות queued עבור
 --    source='trigger', ובלי הקידום הן נשארות מתות לנצח.
 --
+-- 3. הקידום קובע גם expected_end. בלעדיו ה-call המקודם נשאר עם
+--    expected_end = null, ה-sweeper לא רואה אותו לעולם, ואם ה-Worker
+--    ייתקע הקונטקט חסום לנצח.
+--
 -- סדר הקידום: priority asc (מספר נמוך קודם), ואז created_at asc.
 --
 -- drop לפני create: שינוי חתימה ב-create or replace יוצר overload
@@ -99,7 +103,8 @@ begin
     -- ── הבא בתור ────────────────────────────────────────────────────
     select
         c.id,
-        c.scenario_id
+        c.scenario_id,
+        c.scenario_snapshot
     into v_next
     from public.calls c
     where c.phone_id = v_phone
@@ -124,10 +129,13 @@ begin
         );
     end if;
 
+    -- expected_end מחושב כאן ולא ביצירה: ה-SLA מתחיל לרוץ מרגע
+    -- שהתרחיש באמת מתחיל, לא מרגע שנכנס לתור.
     update public.calls
     set
-        status     = 'running',
-        started_at = now()
+        status       = 'running',
+        started_at   = now(),
+        expected_end = public.spine_sla_deadline(v_next.scenario_snapshot, now())
     where id = v_next.id;
 
     return jsonb_build_object(

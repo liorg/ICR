@@ -9,6 +9,9 @@ docker service update --force scenario_data-spine
 
 ```
 
+```bash
+curl -s http://10.186.0.3:8001/version | python3 -m json.tool
+```
 
 ```bash
 CID=$(docker ps -qf "name=worker-972504476645")

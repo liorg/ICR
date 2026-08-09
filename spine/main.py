@@ -15,10 +15,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from dependencies import get_supabase
-from routers import calls, send, incoming, worker_events, dispatch, active_chats ,promote
+from routers import calls, send, incoming, worker_events, dispatch, active_chats
 
 log = logging.getLogger("spine")
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(name)s — %(message)s", datefmt="%H:%M:%S")
+
+# תג ה-build. נקבע ב-Dockerfile (ARG/ENV) ומוחזר ב-/version.
+# בלי זה אין דרך אמינה לדעת איזה קוד רץ: latest גורם ל-Swarm להריץ
+# image ישן, ו-docker cp מעדכן קובץ בלי לטעון אותו מחדש.
+BUILD_TAG  = os.getenv("BUILD_TAG", "unknown")
+STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 # פנימי ל-overlay — משמש את ה-Workers בלבד.
 SPINE_SELF_URL = os.getenv("SPINE_SELF_URL", "http://scenario_data-spine:8000")
@@ -76,29 +82,64 @@ async def registration_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     task = asyncio.create_task(registration_loop())
-    log.info("Spine started | self=%s callback=%s type=%s",
-             SPINE_SELF_URL, SPINE_CALLBACK_URL, WEBHOOK_TYPE)
+    log.info("Spine started | build=%s self=%s callback=%s type=%s",
+             BUILD_TAG, SPINE_SELF_URL, SPINE_CALLBACK_URL, WEBHOOK_TYPE)
     yield
     task.cancel()
     log.info("Spine shutting down")
 
 
-app = FastAPI(title="Data Spine", version="3.1.0", lifespan=lifespan)
+app = FastAPI(title="Data Spine", version="3.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.include_router(calls.router)                     # /calls/{id}
+# ── סדר הרישום קובע ─────────────────────────────────────────────────────
+#
+# FastAPI מתאים את הנתיב הראשון שתופס. calls.router רשום ראשון ומגדיר
+# prefix="/calls", ולכן כל התנגשות איתו מנצחת את מי שנרשם אחריו.
+#
+# בעבר הוא הגדיר גם POST /calls/{id}/summary, וחטף את כל הסיכומים
+# מה-Worker במקום worker_events — ששם נמצאת הסגירה שמקדמת את התור.
+# ה-summary הוסר מ-calls.py; לא להחזיר אותו לשם.
+
+app.include_router(calls.router)                     # POST /calls  ·  GET /calls/{id}
 app.include_router(send.router)                      # /send/{phone_id}          ← Worker
 app.include_router(incoming.router)                  # /incoming                 ← HostAgent
 app.include_router(worker_events.router)             # /events /leaves
                                                      # /workers/heartbeat        ← Worker
                                                      # /calls/{id}/summary       ← Worker (סוגר call + מקדם תור)
-app.include_router(active_chats.router)               # /active-chats/{phone_id}/...
+app.include_router(active_chats.router)              # /active-chats/{phone_id}/...
 app.include_router(dispatch.router, prefix="/api")   # /api/calls/ensure         ← Scheduler + incoming
-                                                     # היה חסר לגמרי: ה-Scheduler קיבל 404 בכל ירייה.
-app.include_router(promote.router,  prefix="/api")   # /api/calls/{id}/promote   ← Scheduler (queue)
-                                                     # היה חסר לגמרי: ה-Scheduler קיבל 404 בכל ירייה.
+                                                     # /api/calls/sweep          ← Scheduler (SLA)
+
+# promote.router הוסר: הקידום עבר ל-spine_complete_call, שרץ תחת אותו
+# advisory lock שסוגר את ה-call. endpoint נפרד לקידום היה מסלול מקביל
+# שיכול להתנגש איתו.
 
 
 @app.get("/")
 def root():
-    return {"service": "data-spine 1.0.0", "status": "online"}
+    return {"service": "data-spine", "status": "online", "build": BUILD_TAG}
+
+
+@app.get("/version")
+def version():
+    """
+    אימות שהקוד שרץ הוא הקוד שנפרס.
+
+    grep על קבצים בקונטיינר לא אמין: docker cp מעדכן את הקובץ אבל
+    Python כבר טען את המודול לזיכרון. started_at מגלה אם היה restart
+    בפועל, ו-ensure_call_unified בודק את החתימה שה-Spine באמת מייבא.
+    """
+    from inspect import signature
+    from services.calls import ensure_call
+
+    params = signature(ensure_call).parameters
+
+    return {
+        "build":      BUILD_TAG,
+        "started_at": STARTED_AT,
+        "unified_ensure_call": "scenario_id" in params,
+        "routes": sorted(
+            {r.path for r in app.routes if hasattr(r, "path")}
+        ),
+    }

@@ -72,7 +72,10 @@ docker service scale scenario_provisioner=1
 
 
 
-
+אם אתה רוצה לבדוק תמיד רק את ה־SHA הרלוונטי לשרת Linux AMD64, הפקודה שלך:
+```bash
+docker buildx imagetools inspect liorgr/worker-scenario-runtime:latest
+```
 
 
 ## sql

@@ -14,6 +14,8 @@ from config import (
 )
 from schedule_service import poll_due_schedules
 from sweep_service import sweep_stale_calls
+from config import RECORDING_EXPIRY_SECONDS
+from recording_service import expire_recording_calls
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -56,6 +58,17 @@ def main() -> None:
             POLL_SECONDS * 2,
             10,
         ),
+    )
+
+    # ── פקיעת recording calls ───────────────────────────────────────
+    scheduler.add_job(
+        expire_recording_calls,
+        trigger="interval",
+        seconds=RECORDING_EXPIRY_SECONDS,
+        id="expire-recording-calls",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=max(RECORDING_EXPIRY_SECONDS, 30),
     )
 
     # ── sweep: סגירת calls תקועים ───────────────────────────────────

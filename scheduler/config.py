@@ -71,3 +71,10 @@ SWEEP_TIMEOUT_SECONDS = max(
     float(os.getenv("SWEEP_TIMEOUT_SECONDS", "60")),
     5.0,
 )
+
+# ── recording expiry ──────────────────────────────────────────────────
+# פקיעת recording calls שה-expected_end שלהם עבר ועדיין active.
+RECORDING_EXPIRY_SECONDS = max(
+    int(os.getenv("RECORDING_EXPIRY_SECONDS", "60")),
+    10,
+)

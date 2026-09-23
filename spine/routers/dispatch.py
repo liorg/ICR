@@ -6,7 +6,15 @@ Dispatch — נקודת הכניסה של Scheduler ו-API ישיר.
     POST /api/calls/{id}/complete
     POST /api/calls/sweep           סוגר calls תקועים לפי expected_end
     POST /api/dispatch/message
+
+init שלא נמסר ל-Worker:
+    אם ה-Worker לא זמין (למשל אחרי restart, לפני ששורת phone_workers
+    חזרה ל-running), ה-call נשאר running בלי session, חוסם את הקונטקט
+    עד ה-SLA, וכל הודעה נכנסת נזרקת ב-Worker ("no active session").
+    לכן: מנסים שוב כמה פעמים, ואם עדיין לא נמסר, משחררים את ה-slot
+    דרך complete_call. ה-Scheduler ינסה שוב בסבב הבא.
 """
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -15,10 +23,15 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from dependencies import get_supabase
-from services.calls import ensure_call, complete_call, send_to_worker, entry_payload
+from services.calls import ensure_call, complete_call, send_to_worker, entry_payload, CallResult
 
 router = APIRouter(tags=["dispatch"])
 log = logging.getLogger("spine.dispatch")
+
+INIT_RETRY_ATTEMPTS = 4
+INIT_RETRY_DELAY_SECS = 1.5
+UNDELIVERED_STATUS = "aborted"   # חייב להיות סטטוס ש-spine_complete_call מקבל
+MAX_PROMOTE_CHAIN = 5
 
 
 # מול call פתוח (running או queued):
@@ -55,6 +68,51 @@ class SweepReq(BaseModel):
     limit:  int = 50
 
 
+# ── init delivery ─────────────────────────────────────────────────────
+async def _send_init_with_retry(db, phone_id: str, payload: dict) -> bool:
+    for attempt in range(1, INIT_RETRY_ATTEMPTS + 1):
+        if await send_to_worker(db, phone_id, payload):
+            if attempt > 1:
+                log.info("[INIT] delivered after retry | call=%s attempt=%s",
+                         payload.get("call_id"), attempt)
+            return True
+        if attempt < INIT_RETRY_ATTEMPTS:
+            await asyncio.sleep(INIT_RETRY_DELAY_SECS)
+    return False
+
+
+async def deliver_init_or_release(db, res: CallResult) -> bool:
+    """
+    שולח init ל-call שה-RPC הפך ל-running.
+    לא נמסר → סוגר את ה-call (משחרר slot). אם הסגירה קידמה queued
+    הבא, מנסה גם אותו — עד MAX_PROMOTE_CHAIN כדי לא להסתובב לנצח.
+    מחזיר האם ה-init של ה-call המקורי נמסר.
+    """
+    current = res
+    first = True
+    delivered_original = False
+
+    for _ in range(MAX_PROMOTE_CHAIN):
+        if not current.needs_worker:
+            break
+
+        call_id = current.worker_payload.get("call_id")
+        ok = await _send_init_with_retry(db, current.phone_id, current.worker_payload)
+
+        if first:
+            delivered_original = ok
+            first = False
+
+        if ok:
+            break
+
+        log.error("[INIT] undelivered, releasing slot | call=%s phone=%s",
+                  call_id, current.phone_id)
+        current = await complete_call(db, call_id, UNDELIVERED_STATUS)
+
+    return delivered_original
+
+
 # ── ensure ────────────────────────────────────────────────────────────
 @router.post("/calls/ensure")
 async def ensure(req: EnsureReq, response: Response):
@@ -78,7 +136,13 @@ async def ensure(req: EnsureReq, response: Response):
 
     # ה-Worker מופעל מה-response — לא מתוך ה-service.
     if res.needs_worker:
-        res.with_delivery(await send_to_worker(db, res.phone_id, res.worker_payload))
+        delivered = await deliver_init_or_release(db, res)
+        res.with_delivery(delivered)
+        if not delivered:
+            res.body["status"] = UNDELIVERED_STATUS
+            res.body["code"] = "WORKER_UNAVAILABLE"
+            response.status_code = 503
+            return res.body
 
     response.status_code = res.http_status
     return res.body
@@ -91,7 +155,7 @@ async def complete(call_id: str, req: CompleteReq, response: Response):
     res = await complete_call(db, call_id, req.status)
 
     if res.needs_worker:
-        res.with_delivery(await send_to_worker(db, res.phone_id, res.worker_payload))
+        res.with_delivery(await deliver_init_or_release(db, res))
 
     response.status_code = res.http_status
     return res.body
@@ -142,7 +206,7 @@ async def sweep(req: SweepReq):
 
         delivered = False
         if res.needs_worker:
-            delivered = await send_to_worker(db, res.phone_id, res.worker_payload)
+            delivered = await deliver_init_or_release(db, res)
 
         log.warning(
             "[SWEEP] closed stuck call | call=%s contact=%s expected_end=%s "

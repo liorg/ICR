@@ -31,9 +31,14 @@ docker exec -it $CID sh -c "curl -sm5 http://scenario_data-spine:8000/openapi.js
 docker pull liorgr/worker-scenario-runtime:latest
 docker service update --image liorgr/worker-scenario-runtime:latest --force worker-972504476645-3beff8fa
 ```
+```bash
+docker service logs scenario_data-spine --since 2h 2>&1 | grep -E "2281bd88|6a575745" | head -50
+```
 
+```bash
+docker service logs worker-972546252491-597f7135 --tail 200
+```
 
---
 
 ```bash
 CID=$(docker ps -qf "name=worker-972504476645")

@@ -36,7 +36,7 @@ SPINE_CALLBACK_URL = os.getenv("SPINE_CALLBACK_URL", "http://10.186.0.3:8001")
 WEBHOOK_TYPE     = os.getenv("WEBHOOK_TYPE", "trigger")
 REGISTER_EVERY_S = int(os.getenv("REGISTER_INTERVAL_SECONDS", "60"))
 
-
+appversion="1.0.0.0"
 def _now():
     return datetime.now(timezone.utc)
 
@@ -137,6 +137,7 @@ def version():
 
     return {
         "build":      BUILD_TAG,
+        "version":      appversion,
         "started_at": STARTED_AT,
         "unified_ensure_call": "scenario_id" in params,
         "routes": sorted(

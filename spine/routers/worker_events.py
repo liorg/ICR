@@ -31,6 +31,7 @@ expected_end.
 """
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
@@ -388,6 +389,86 @@ def heartbeat(hb: HeartbeatIn):
     }
 
 
+
+# ── Summary → notifications (לקוח) ────────────────────────────────────
+#
+# SUMMARY_NOTIFY = all | failed | off   (ברירת מחדל all)
+# best effort: כשל כאן לעולם לא משפיע על סגירת ה-call.
+
+_SUMMARY_TITLES = {
+    "completed": ("תרחיש הסתיים", "success"),
+    "failed": ("תרחיש נכשל", "error"),
+    "aborted": ("תרחיש בוטל", "info"),
+    "expired": ("תרחיש פג תוקף", "warning"),
+    "timeout": ("תרחיש הסתיים ב-timeout", "warning"),
+}
+
+
+def _notify_summary(db, summary: "SummaryIn", phone_id: str, contact_id: str) -> bool:
+    mode = (os.getenv("SUMMARY_NOTIFY") or "all").strip().lower()
+    if mode == "off":
+        return False
+    if mode == "failed" and summary.status == "completed" and summary.mismatch_count == 0:
+        return False
+
+    try:
+        phone = (
+            db.table("phones").select("*").eq("id", phone_id).limit(1).execute().data
+            if phone_id else []
+        )
+        user_id = phone[0].get("user_id") if phone else None
+        if not user_id:
+            log.warning("[SUMMARY-NOTIFY] no owner | call=%s phone=%s", summary.call_id, phone_id)
+            return False
+
+        contact = (
+            db.table("contacts").select("*").eq("id", contact_id).limit(1).execute().data
+            if contact_id else []
+        )
+        c = contact[0] if contact else {}
+        who = c.get("name") or c.get("number") or contact_id or "—"
+
+        title, level = _SUMMARY_TITLES.get(summary.status, ("תרחיש הסתיים", "info"))
+        if summary.status == "completed" and summary.mismatch_count > 0:
+            level = "warning"
+
+        parts = [
+            f"{who}",
+            f"{summary.duration_seconds}s",
+            f"נשלחו {summary.sender_count}",
+            f"התקבלו {summary.expected_count}",
+            f"אי-התאמות {summary.mismatch_count}",
+        ]
+        if summary.status != "completed" and summary.last_step_id:
+            parts.append(f"צעד אחרון {summary.last_step_id}")
+
+        db.table("notifications").insert({
+            "user_id": user_id,
+            "phone_id": phone_id or None,
+            "title": title,
+            "message": " · ".join(parts),
+            "log_level": level,
+            "is_read": False,
+            "is_send": False,
+            "source": "call_summary",
+            "extra": {
+                "call_id": summary.call_id,
+                "scenario_id": summary.scenario_id,
+                "contact_id": contact_id,
+                "status": summary.status,
+                "duration_seconds": summary.duration_seconds,
+                "sender_count": summary.sender_count,
+                "expected_count": summary.expected_count,
+                "mismatch_count": summary.mismatch_count,
+                "last_step_id": summary.last_step_id,
+            },
+        }).execute()
+        return True
+    except Exception:
+        log.exception("[SUMMARY-NOTIFY] insert failed | call=%s", summary.call_id)
+        return False
+
+
 # ── Summary = אות הסיום ───────────────────────────────────────────────
 
 @router.post("/calls/{call_id}/summary")
@@ -569,6 +650,11 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
         final_status=summary.status,
     )
 
+    # Summary כפול לא מייצר התראה כפולה.
+    notified = False
+    if code != "CALL_ALREADY_CLOSED":
+        notified = _notify_summary(db, summary, call_phone_id, call_contact_id)
+
     log.info(
         "[SUMMARY] scenario=%s call=%s status=%s "
         "duration=%ds sender=%d expected=%d mismatches=%d result=%s",
@@ -599,4 +685,5 @@ async def ingest_summary(call_id: str, summary: SummaryIn):
         "next_call_delivered": promoted_delivered,
         "end_marker_sent": marker_result.get("ok", False),
         "end_marker_code": marker_result.get("code"),
+        "notified": notified,
     }

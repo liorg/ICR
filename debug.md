@@ -347,3 +347,36 @@ curl -s -w "\nHTTP %{http_code}\n"   -X POST "http://10.186.0.2:5000/api/phones/
 {"success":true,"messageId":"3EB01E142873CC87C887E0"}
 
 ```
+
+הסקריפט מוכן, update-workers.sh. את ההרצה מול Docker Hub לא יכולתי לבדוק כאן: הגישה ל-Docker Hub חסומה מכאן. בדקתי רק תחביר, ואת בחירת התג על דוגמה מהתגים שראינו קודם.
+
+
+
+```bash
+chmod +x update-workers.sh
+sudo ./update-workers.sh --dry-run        # מה ייעשה, בלי לגעת
+sudo ./update-workers.sh                  # עדכון לאחרון
+sudo ./update-workers.sh sha-568ff14      # עדכון/חזרה לתג מסוים
+
+```
+
+מה הסקריפט עושה:
+TAG=sha-48f18d2
+
+# אין שיחות running לפני העדכון
+# select count(*) from calls where status = 'running';
+
+for S in $(sudo docker service ls --format '{{.Name}} {{.Image}}' | awk '/worker-scenario-runtime/{print $1}'); do
+  echo "== $S"
+  sudo docker service update --quiet --with-registry-auth \
+    --image liorgr/worker-scenario-runtime:$TAG "$S"
+done
+
+#אימות: התג וה-digest
+```bash
+שרצים בפועל
+sudo docker service ls --format '{{.Name}}  {{.Image}}' | grep worker-scenario-runtime
+for S in $(sudo docker service ls --format '{{.Name}} {{.Image}}' | awk '/worker-scenario-runtime/{print $1}'); do
+  sudo docker service inspect "$S" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}'
+done
+```

@@ -20,17 +20,15 @@ var (
 	network     string
 	spineURL    string
 	workerImage string
-	baseTrusted []string // env TRUSTED_DOMAINS — גלובלי לכל ה-workers
+	baseTrusted string // env TRUSTED_DOMAINS — גלובלי. דומיינים של משתמש מגיעים מה-Spine ב-init
 )
 
-// אותו regex כמו ב-SQL / Python / C#. מגן על ה-env וה-label של docker.  retry 
 var domainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 
 type Phone struct {
 	ID     string `json:"id"`
 	Number string `json:"number"`
 	Status string `json:"status"`
-	UserID string `json:"user_id"`
 }
 
 type PhoneWorker struct {
@@ -39,21 +37,15 @@ type PhoneWorker struct {
 	Status      string `json:"status"`
 }
 
-type TrustedDomain struct {
-	UserID string `json:"user_id"`
-	Domain string `json:"domain"`
-}
-
 func main() {
 	supabaseURL = mustEnv("SUPABASE_URL")
 	supabaseKey = mustEnv("SUPABASE_SERVICE_KEY")
 	network = envOr("SWARM_NETWORK", "scenario_spine-net")
 	spineURL = envOr("SPINE_URL", "http://scenario_data-spine:8000")
 	workerImage = envOr("WORKER_IMAGE", "liorgr/worker-scenario-runtime:latest")
-	baseTrusted = parseDomains(strings.Split(os.Getenv("TRUSTED_DOMAINS"), ","))
+	baseTrusted = parseDomains(os.Getenv("TRUSTED_DOMAINS"))
 
-	log.Printf("Provisioner started | network=%s spine=%s image=%s trusted=%s",
-		network, spineURL, workerImage, strings.Join(baseTrusted, ","))
+	log.Printf("Provisioner started | network=%s spine=%s image=%s", network, spineURL, workerImage)
 
 	for {
 		func() {
@@ -71,7 +63,7 @@ func main() {
 func reconcile() {
 	log.Println("Reconcile starting...")
 
-	phonesRaw := supabaseGet("phones?select=id,number,status,user_id&status=eq.active")
+	phonesRaw := supabaseGet("phones?select=id,number,status&status=eq.active")
 	log.Printf("Phones response: %s", string(phonesRaw))
 
 	var phoneList []Phone
@@ -87,28 +79,20 @@ func reconcile() {
 		workerList = []PhoneWorker{}
 	}
 
-	trustedByUser, trustedOK := loadTrusted()
-
 	existing := map[string]*PhoneWorker{}
 	for i := range workerList {
 		existing[workerList[i].PhoneID] = &workerList[i]
 	}
 
-	log.Printf("Reconcile | phones=%d workers=%d trusted_users=%d", len(phoneList), len(workerList), len(trustedByUser))
+	log.Printf("Reconcile | phones=%d workers=%d", len(phoneList), len(workerList))
 
 	for _, phone := range phoneList {
-		trusted := trustedFor(phone.UserID, trustedByUser)
-
 		w, exists := existing[phone.ID]
 		if exists && w.Status == "running" {
 			// ה-DB אומר running — אבל אם השירות נמחק ידנית,
 			// דילוג כאן משאיר את המערכת תקועה לצמיתות:
 			// אין worker, וה-Spine שולח ל-DNS מת.
 			if err := exec.Command("docker", "service", "inspect", w.ServiceName).Run(); err == nil {
-				// כשל בקריאת trusted_domains → לא נוגעים (לא מוחקים הרשאות בגלל תקלת רשת)
-				if trustedOK {
-					syncTrusted(w.ServiceName, trusted)
-				}
 				continue
 			}
 			log.Printf("Service %s marked running but missing — recreating", w.ServiceName)
@@ -121,9 +105,9 @@ func reconcile() {
 		}
 		svcName := fmt.Sprintf("worker-%s-%s", cleanNum, shortID)
 
-		log.Printf("Creating worker | phone=%s number=%s service=%s trusted=%s", phone.ID, cleanNum, svcName, trusted)
+		log.Printf("Creating worker | phone=%s number=%s service=%s", phone.ID, cleanNum, svcName)
 
-		err := createService(svcName, phone.ID, cleanNum, trusted)
+		err := createService(svcName, phone.ID, cleanNum)
 		if err != nil {
 			log.Printf("ERROR create %s: %v", svcName, err)
 			upsertWorker(phone.ID, svcName, "error")
@@ -149,86 +133,9 @@ func reconcile() {
 	log.Println("Reconcile done")
 }
 
-// ── trusted domains ───────────────────────────────────────────────────────
-
-func parseDomains(raw []string) []string {
-	seen := map[string]bool{}
-	out := []string{}
-	for _, p := range raw {
-		d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(p)), ".")
-		if d == "" || seen[d] {
-			continue
-		}
-		if len(d) > 253 || !domainRe.MatchString(d) {
-			log.Printf("WARN dropping invalid trusted domain %q", p)
-			continue
-		}
-		seen[d] = true
-		out = append(out, d)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// רק verified ושהתעודה עוד בתוקף
-func loadTrusted() (map[string][]string, bool) {
-	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	raw, ok := supabaseGetOK("trusted_domains?select=user_id,domain&status=eq.verified&cert_expires_at=gt." + now)
-	if !ok {
-		return nil, false
-	}
-	var rows []TrustedDomain
-	if err := json.Unmarshal(raw, &rows); err != nil {
-		log.Printf("ERROR unmarshal trusted_domains: %v", err)
-		return nil, false
-	}
-	byUser := map[string][]string{}
-	for _, r := range rows {
-		byUser[r.UserID] = append(byUser[r.UserID], r.Domain)
-	}
-	return byUser, true
-}
-
-func trustedFor(userID string, byUser map[string][]string) string {
-	all := append([]string{}, baseTrusted...)
-	if userID != "" {
-		all = append(all, byUser[userID]...)
-	}
-	return strings.Join(parseDomains(all), ",")
-}
-
-// label trusted-domains = מה שה-worker רץ איתו כרגע. שונה → service update (restart של ה-worker)
-func syncTrusted(svcName, trusted string) {
-	out, err := exec.Command("docker", "service", "inspect", "--format",
-		`{{index .Spec.Labels "trusted-domains"}}`, svcName).Output()
-	if err != nil {
-		log.Printf("ERROR inspect labels %s: %v", svcName, err)
-		return
-	}
-	current := strings.TrimSpace(string(out))
-	if current == "<no value>" {
-		current = ""
-	}
-	if current == trusted {
-		return
-	}
-
-	log.Printf("Trusted domains changed | service=%s from=%q to=%q", svcName, current, trusted)
-	res, err := exec.Command("docker", "service", "update", "--detach",
-		"--env-add", "TRUSTED_DOMAINS="+trusted,
-		"--label-add", "trusted-domains="+trusted,
-		svcName).CombinedOutput()
-	if err != nil {
-		log.Printf("ERROR update trusted %s: %v | %s", svcName, err, string(res))
-	}
-}
-
-// ── docker ────────────────────────────────────────────────────────────────
-
-func createService(name, phoneID, phoneNumber, trusted string) error {
+func createService(name, phoneID, phoneNumber string) error {
 	if err := exec.Command("docker", "service", "inspect", name).Run(); err == nil {
 		log.Printf("Service %s already exists", name)
-		syncTrusted(name, trusted)
 		return nil
 	}
 
@@ -241,7 +148,6 @@ func createService(name, phoneID, phoneNumber, trusted string) error {
 		"--label", "managed-by=provisioner",
 		"--label", "phone-id=" + phoneID,
 		"--label", "phone-number=" + phoneNumber,
-		"--label", "trusted-domains=" + trusted,
 		"--env", "PHONE_ID=" + phoneID,
 		"--env", "PHONE_NUMBER=" + phoneNumber,
 		"--env", "SERVICE_NAME=" + name,
@@ -252,8 +158,7 @@ func createService(name, phoneID, phoneNumber, trusted string) error {
 		"--env", "WA_FASTAPI_URL=" + spineURL,
 		"--env", "DENO_BIN=/usr/local/bin/deno",
 		"--env", "DENO_TMPDIR=/tmp/deno-scripts",
-		// Deno --allow-net + בדיקת ה-compiler
-		"--env", "TRUSTED_DOMAINS=" + trusted,
+		"--env", "TRUSTED_DOMAINS=" + baseTrusted,
 		workerImage,
 	}
 
@@ -265,19 +170,12 @@ func createService(name, phoneID, phoneNumber, trusted string) error {
 	return nil
 }
 
-// ── supabase ──────────────────────────────────────────────────────────────
-
 func supabaseGet(path string) []byte {
-	body, _ := supabaseGetOK(path)
-	return body
-}
-
-func supabaseGetOK(path string) ([]byte, bool) {
 	url := supabaseURL + "/rest/v1/" + path
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		log.Printf("Request build error: %v", err)
-		return []byte("[]"), false
+		return []byte("[]")
 	}
 	req.Header.Set("apikey", supabaseKey)
 	req.Header.Set("Authorization", "Bearer "+supabaseKey)
@@ -285,22 +183,22 @@ func supabaseGetOK(path string) ([]byte, bool) {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("Supabase GET error: %v", err)
-		return []byte("[]"), false
+		return []byte("[]")
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("Body read error: %v", err)
-		return []byte("[]"), false
+		return []byte("[]")
 	}
 
 	if resp.StatusCode != 200 {
 		log.Printf("Supabase %d: %s", resp.StatusCode, string(body))
-		return []byte("[]"), false
+		return []byte("[]")
 	}
 
-	return body, true
+	return body
 }
 
 func upsertWorker(phoneID, serviceName, status string) {
@@ -334,6 +232,21 @@ func upsertWorker(phoneID, serviceName, status string) {
 		body, _ := io.ReadAll(resp.Body)
 		log.Printf("Upsert worker %d: %s", resp.StatusCode, string(body))
 	}
+}
+
+func parseDomains(raw string) string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, p := range strings.Split(raw, ",") {
+		d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(p)), ".")
+		if d == "" || seen[d] || len(d) > 253 || !domainRe.MatchString(d) {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
 }
 
 func mustEnv(k string) string {

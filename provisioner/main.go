@@ -23,7 +23,7 @@ var (
 	baseTrusted []string // env TRUSTED_DOMAINS — גלובלי לכל ה-workers
 )
 
-// אותו regex כמו ב-SQL / Python / C#. מגן על ה-env וה-label של docker. retry again
+// אותו regex כמו ב-SQL / Python / C#. מגן על ה-env וה-label של docker. agaig retry again
 var domainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 
 type Phone struct {

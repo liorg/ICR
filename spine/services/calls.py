@@ -13,8 +13,9 @@ spine/services/calls.py — שכבת הלוגיקה של calls.
         res.delivered = await send_to_worker(db, res.phone_id, res.worker_payload)
     return res.http_status, res.body
 """
-import json, logging, os
+import json, logging, os, re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -26,6 +27,26 @@ WORKER_PORT = 9000
 # מקור אמת משותף ל-Summary ול-webhook.
 CALL_END_EMOJI = os.getenv("CALL_END_EMOJI", "🏁🏁").strip() or "🏁🏁"
 CALL_END_TYPE = "call_end"
+
+# ── Trusted domains ───────────────────────────────────────────────────────
+# נשלפים בכל init ונשלחים ל-Worker ב-payload — דומיין שנוסף עכשיו תקף
+# מה-call הבא, בלי restart ל-worker (שהיה מוחק calls שרצים בזיכרון).
+# אותו regex כמו ב-SQL / Python / C#.
+_DOMAIN_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+
+
+def _clean_domains(values) -> set:
+    out = set()
+    for v in values or []:
+        d = str(v or "").strip().lower().rstrip(".")
+        if d and _DOMAIN_RE.match(d):
+            out.add(d)
+    return out
+
+
+TRUSTED_DOMAINS_BASE = _clean_domains(os.getenv("TRUSTED_DOMAINS", "").split(","))
 
 
 async def _rpc(fn: str, params: dict) -> dict:
@@ -239,7 +260,29 @@ def worker_url(db, phone_id: str) -> Optional[str]:
     return f"http://{r[0]['service_name']}:{WORKER_PORT}" if r else None
 
 
+def trusted_domains_for_phone(db, phone_id: str) -> list:
+    """verified + תעודה בתוקף, של בעל הטלפון, ועוד רשימת הבסיס מ-env.
+    תקלה → רשימת הבסיס בלבד (fail closed — לא פותחים הרשאות בגלל שגיאה)."""
+    domains = set(TRUSTED_DOMAINS_BASE)
+    try:
+        ph = db.table("phones").select("user_id").eq("id", phone_id).limit(1).execute().data
+        user_id = ph[0].get("user_id") if ph else None
+        if user_id:
+            now = datetime.now(timezone.utc).isoformat()
+            rows = db.table("trusted_domains").select("domain") \
+                     .eq("user_id", user_id).eq("status", "verified") \
+                     .gt("cert_expires_at", now).execute().data
+            domains |= _clean_domains(r.get("domain") for r in (rows or []))
+    except Exception as e:
+        log.error("[TRUSTED] lookup failed | phone=%s: %s", phone_id, e)
+    return sorted(domains)
+
+
 async def send_to_worker(db, phone_id: str, payload: dict) -> bool:
+    # נקודת שליחה יחידה ל-init (dispatch / incoming / summary / complete)
+    if payload.get("typeEvent") == "init" and "trusted_domains" not in payload:
+        payload = {**payload, "trusted_domains": trusted_domains_for_phone(db, phone_id)}
+
     url = worker_url(db, phone_id)
     if not url:
         log.warning("[WORKER] none running | phone=%s event=%s",

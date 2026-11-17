@@ -6,6 +6,7 @@ Dispatch — נקודת הכניסה של Scheduler ו-API ישיר.
     POST /api/calls/{id}/complete
     POST /api/calls/sweep           סוגר calls תקועים לפי expected_end
     POST /api/dispatch/message
+    POST /api/dispatch/sms          SMS מטלפון מושכר → Worker (wait_sms)
 
 init שלא נמסר ל-Worker:
     אם ה-Worker לא זמין (למשל אחרי restart, לפני ששורת phone_workers
@@ -23,7 +24,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from dependencies import get_supabase
-from services.calls import ensure_call, complete_call, send_to_worker, entry_payload, CallResult
+from services.calls import ensure_call, complete_call, send_to_worker, entry_payload, sms_payload, CallResult
 
 router = APIRouter(tags=["dispatch"])
 log = logging.getLogger("spine.dispatch")
@@ -56,6 +57,14 @@ class ForwardReq(BaseModel):
     message_id:          Optional[str] = None
     whatsapp_message_id: Optional[str] = None
     payload:             Optional[dict] = None
+
+
+# ה-Manager שולח {kind:"sms", phoneId, sms:{msg_id, sms_id, from, text, received_at}}
+class SmsForwardReq(BaseModel):
+    kind:     str = "sms"
+    phoneId:  Optional[str] = None
+    phone_id: Optional[str] = None
+    sms:      dict
 
 
 class CompleteReq(BaseModel):
@@ -255,3 +264,26 @@ async def forward_message(req: ForwardReq):
         metadata=p.get("data"),
     ))
     return {"ok": ok, "delivered": ok}
+
+
+# ── forward incoming SMS (rented phone) ──────────────────────────────
+async def forward_sms(body: dict) -> dict:
+    """גם לשימוש מה-receiver הקיים: if body.get("kind") == "sms": return await forward_sms(body)"""
+    phone_id = body.get("phoneId") or body.get("phone_id")
+    sms      = body.get("sms") or {}
+    if not phone_id:
+        raise HTTPException(422, "phoneId required")
+    if not (sms.get("text") or "").strip():
+        raise HTTPException(422, "sms.text required")
+
+    db = get_supabase()
+    ok = await send_to_worker(db, phone_id, sms_payload(phone_id, sms))
+    log.info("[SMS] forward | phone=%s from=%s msg=%s delivered=%s",
+             phone_id, sms.get("from"), sms.get("msg_id") or sms.get("sms_id"), ok)
+    # אין Worker רץ = אין wait_sms פעיל. לא שגיאה — 200 עם delivered=false (ה-Manager לא ינסה שוב)
+    return {"ok": True, "delivered": ok}
+
+
+@router.post("/dispatch/sms")
+async def dispatch_sms(req: SmsForwardReq):
+    return await forward_sms(req.model_dump() if hasattr(req, "model_dump") else req.dict())

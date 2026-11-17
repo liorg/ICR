@@ -317,6 +317,25 @@ def init_payload(call_id, contact, scenario_id, snapshot, first_message=None) ->
 
 
 
+def sms_payload(phone_id: str, sms: dict) -> dict:
+    """
+    typeEvent=smsMessage. SMS מטלפון מושכר → Worker של הטלפון.
+    אין call_id/contact_id: ה-Worker מתאים לפי wait_sms פעיל (SmsInbox).
+    """
+    sms = sms or {}
+    return {
+        "typeEvent": "smsMessage",
+        "phone_id":  phone_id,
+        "sms": {
+            "msg_id":      sms.get("msg_id") or sms.get("sms_id"),
+            "sms_id":      sms.get("sms_id"),
+            "from":        sms.get("from") or "",
+            "text":        sms.get("text") or "",
+            "received_at": sms.get("received_at"),
+        },
+    }
+
+
 def entry_payload(
     call_id: str,
     scenario_id: Optional[str],

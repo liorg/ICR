@@ -353,9 +353,10 @@ curl -s -w "\nHTTP %{http_code}\n"   -X POST "http://10.186.0.2:5000/api/phones/
 
 
 ```bash
+cd /opt/ICR
 chmod +x update-workers.sh
-sudo ./update-workers.sh --dry-run        # מה ייעשה, בלי לגעת
 sudo ./update-workers.sh                  # עדכון לאחרון
+sudo ./update-workers.sh --dry-run        # מה ייעשה, בלי לגעת
 sudo ./update-workers.sh sha-568ff14      # עדכון/חזרה לתג מסוים
 
 ```
@@ -378,5 +379,25 @@ done
 sudo docker service ls --format '{{.Name}}  {{.Image}}' | grep worker-scenario-runtime
 for S in $(sudo docker service ls --format '{{.Name}} {{.Image}}' | awk '/worker-scenario-runtime/{print $1}'); do
   sudo docker service inspect "$S" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}'
+done
+```
+
+
+```bash
+curl -s http://10.186.0.3:8001/version | python3 -m json.tool
+
+```
+
+
+
+```bash
+docker service ls --format '{{.Name}}\t{{.Image}}' | grep -i worker
+```
+
+
+```bash
+C=$(docker ps -q -f label=com.docker.swarm.service.name=scenario_data-spine | head -1)
+for S in worker-972504476645-3beff8fa worker-972504477197-a456f63d worker-972508375877-48348c4f; do
+  docker exec $C python3 -c "import urllib.request;print('$S',urllib.request.urlopen('http://$S:9000/version',timeout=5).read().decode())"
 done
 ```

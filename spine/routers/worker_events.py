@@ -396,11 +396,11 @@ def heartbeat(hb: HeartbeatIn):
 # best effort: כשל כאן לעולם לא משפיע על סגירת ה-call.
 
 _SUMMARY_TITLES = {
-    "completed": ("תרחיש הסתיים", "success"),
-    "failed": ("תרחיש נכשל", "error"),
-    "aborted": ("תרחיש בוטל", "info"),
-    "expired": ("תרחיש פג תוקף", "warning"),
-    "timeout": ("תרחיש הסתיים ב-timeout", "warning"),
+    "completed": ("Scenario completed", "success"),
+    "failed": ("Scenario failed", "error"),
+    "aborted": ("Scenario aborted", "info"),
+    "expired": ("Scenario expired", "warning"),
+    "timeout": ("Scenario timed out", "warning"),
 }
 
 
@@ -428,19 +428,19 @@ def _notify_summary(db, summary: "SummaryIn", phone_id: str, contact_id: str) ->
         c = contact[0] if contact else {}
         who = c.get("name") or c.get("number") or contact_id or "—"
 
-        title, level = _SUMMARY_TITLES.get(summary.status, ("תרחיש הסתיים", "info"))
+        title, level = _SUMMARY_TITLES.get(summary.status, ("Scenario finished", "info"))
         if summary.status == "completed" and summary.mismatch_count > 0:
             level = "warning"
 
         parts = [
             f"{who}",
             f"{summary.duration_seconds}s",
-            f"נשלחו {summary.sender_count}",
-            f"התקבלו {summary.expected_count}",
-            f"אי-התאמות {summary.mismatch_count}",
+            f"sent {summary.sender_count}",
+            f"received {summary.expected_count}",
+            f"mismatches {summary.mismatch_count}",
         ]
         if summary.status != "completed" and summary.last_step_id:
-            parts.append(f"צעד אחרון {summary.last_step_id}")
+            parts.append(f"last step {summary.last_step_id}")
 
         db.table("notifications").insert({
             "user_id": user_id,

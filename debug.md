@@ -394,6 +394,11 @@ curl -s http://10.186.0.3:8001/version | python3 -m json.tool
 docker service ls --format '{{.Name}}\t{{.Image}}' | grep -i worker
 ```
 
+```bash
+docker pull liorgr/worker-scenario-runtime:latest
+docker service ls --format '{{.Name}}' | grep '^worker-' | xargs -r docker service rm
+docker service ls | grep worker- || echo "all removed"
+```
 
 ```bash
 C=$(docker ps -q -f label=com.docker.swarm.service.name=scenario_data-spine | head -1)

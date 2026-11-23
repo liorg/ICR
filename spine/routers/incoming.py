@@ -37,6 +37,8 @@ SMS (טלפון מושכר):
     אין message ב-messages, אין contact ואין trigger — רק העברה ל-Worker
     (typeEvent=smsMessage), שם wait_sms פעיל צורך אותו.
     לכן ה-body נקרא כ-dict ורק אחרי בדיקת kind עובר validation של WhatsApp.
+
+מייל: אותו דבר עם {kind:"mail", phoneId, mail:{...}} → typeEvent=mailMessage.
 """
 
 import json
@@ -89,6 +91,11 @@ async def handle_incoming(raw: dict = Body(...)):
     if raw.get("kind") == "sms":
         from routers.dispatch import forward_sms
         return await forward_sms(raw)
+
+    # ── מייל ───────────────────────────────────────────────────────────
+    if raw.get("kind") == "mail":
+        from routers.dispatch import forward_mail
+        return await forward_mail(raw)
 
     # ── WhatsApp (kind="whatsapp" או חסר — HostAgent ישן) ───────────────
     try:

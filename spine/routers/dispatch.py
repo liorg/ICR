@@ -7,6 +7,7 @@ Dispatch — נקודת הכניסה של Scheduler ו-API ישיר.
     POST /api/calls/sweep           סוגר calls תקועים לפי expected_end
     POST /api/dispatch/message
     POST /api/dispatch/sms          SMS מטלפון מושכר → Worker (wait_sms)
+    POST /api/dispatch/mail         מייל ל-inbox של הטלפון → Worker (wait_mail)
 
 init שלא נמסר ל-Worker:
     אם ה-Worker לא זמין (למשל אחרי restart, לפני ששורת phone_workers
@@ -24,7 +25,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from dependencies import get_supabase
-from services.calls import ensure_call, complete_call, send_to_worker, entry_payload, sms_payload, CallResult
+from services.calls import ensure_call, complete_call, send_to_worker, entry_payload, sms_payload, mail_payload, CallResult
 
 router = APIRouter(tags=["dispatch"])
 log = logging.getLogger("spine.dispatch")
@@ -65,6 +66,14 @@ class SmsForwardReq(BaseModel):
     phoneId:  Optional[str] = None
     phone_id: Optional[str] = None
     sms:      dict
+
+
+# ה-Manager שולח {kind:"mail", phoneId, mail:{msg_id, mail_id, from, to, subject, text, received_at}}
+class MailForwardReq(BaseModel):
+    kind:     str = "mail"
+    phoneId:  Optional[str] = None
+    phone_id: Optional[str] = None
+    mail:     dict
 
 
 class CompleteReq(BaseModel):
@@ -287,3 +296,25 @@ async def forward_sms(body: dict) -> dict:
 @router.post("/dispatch/sms")
 async def dispatch_sms(req: SmsForwardReq):
     return await forward_sms(req.model_dump() if hasattr(req, "model_dump") else req.dict())
+
+
+# ── forward incoming mail ─────────────────────────────────────────────
+async def forward_mail(body: dict) -> dict:
+    phone_id = body.get("phoneId") or body.get("phone_id")
+    mail     = body.get("mail") or {}
+    if not phone_id:
+        raise HTTPException(422, "phoneId required")
+    # OTP יכול להיות בנושא בלבד — מספיק אחד מהשניים
+    if not ((mail.get("text") or "").strip() or (mail.get("subject") or "").strip()):
+        raise HTTPException(422, "mail.text or mail.subject required")
+
+    db = get_supabase()
+    ok = await send_to_worker(db, phone_id, mail_payload(phone_id, mail))
+    log.info("[MAIL] forward | phone=%s from=%s msg=%s delivered=%s",
+             phone_id, mail.get("from"), mail.get("msg_id") or mail.get("mail_id"), ok)
+    return {"ok": True, "delivered": ok}
+
+
+@router.post("/dispatch/mail")
+async def dispatch_mail(req: MailForwardReq):
+    return await forward_mail(req.model_dump() if hasattr(req, "model_dump") else req.dict())

@@ -336,6 +336,28 @@ def sms_payload(phone_id: str, sms: dict) -> dict:
     }
 
 
+def mail_payload(phone_id: str, mail: dict) -> dict:
+    """
+    typeEvent=mailMessage. מייל ל-inbox של הטלפון → Worker של הטלפון.
+    אין call_id/contact_id: ה-Worker מתאים לפי wait_mail פעיל (MailInbox).
+    """
+    mail = mail or {}
+    return {
+        "typeEvent": "mailMessage",
+        "phone_id":  phone_id,
+        "mail": {
+            "msg_id":      mail.get("msg_id") or mail.get("mail_id"),
+            "mail_id":     mail.get("mail_id"),
+            "from":        mail.get("from") or "",
+            "from_name":   mail.get("from_name") or "",
+            "to":          mail.get("to") or "",
+            "subject":     mail.get("subject") or "",
+            "text":        mail.get("text") or "",
+            "received_at": mail.get("received_at"),
+        },
+    }
+
+
 def entry_payload(
     call_id: str,
     scenario_id: Optional[str],
